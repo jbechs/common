@@ -30,8 +30,8 @@
 
     .trackBadge{
       position:absolute;
-      top:4px;
-      right:-14px;
+      top:6px;
+      right:-12px;
       font-size:.72rem;
       color:#4a4a4a;
       letter-spacing:.08em;
@@ -51,11 +51,6 @@
       font-size:1.8rem;
       letter-spacing:.04em;
       font-weight:600;
-    }
-
-    .subtitle{
-      font-size:.9rem;
-      color:#aaa;
     }
 
     label{
@@ -118,7 +113,7 @@
     }
 
     .hidden{
-      display:none;
+      display:none !important;
     }
 
     audio{
@@ -157,7 +152,6 @@
     <div id="countdown" class="countdown"></div>
     <div id="status" class="status">Ready.</div>
     <div id="transport" class="transport">00:00 / 00:00</div>
-
     <div id="debug" class="debug"></div>
 
     <audio
@@ -228,12 +222,22 @@
       audio.controls = false;
     }
 
+    function showMainBegin(){
+      playButton.classList.remove("hidden");
+    }
+
+    function hideMainBegin(){
+      playButton.classList.add("hidden");
+    }
+
     function showStartNow(){
       startNowButton.classList.remove("hidden");
+      hideMainBegin();
     }
 
     function hideStartNow(){
       startNowButton.classList.add("hidden");
+      showMainBegin();
     }
 
     function clearTimers(){
@@ -289,6 +293,10 @@
       return keys[Math.floor(Math.random() * keys.length)];
     }
 
+    function updateTrackBadge(){
+      trackBadgeEl.textContent = assignedTrack ? assignedTrack : "";
+    }
+
     function resolveTrackAssignment(){
       const reset = getQueryParam("resetTrack");
       if(reset === "1"){
@@ -311,6 +319,7 @@
         return assignedTrack;
       }
 
+      updateTrackBadge();
       return null;
     }
 
@@ -329,14 +338,12 @@
       return track;
     }
 
-    function updateTrackBadge(){
-      trackBadgeEl.textContent = assignedTrack ? assignedTrack : "";
-    }
-
     function resetAudioSourceState(){
       sourceAssigned = false;
+      audio.pause();
       audio.removeAttribute("src");
       audio.load();
+      updateTransport();
     }
 
     function assignSourceIfNeeded(){
@@ -348,10 +355,16 @@
       sourceAssigned = true;
     }
 
-    function lockBeginButton(){
+    function lockMainBegin(){
       playButton.disabled = true;
       playButton.textContent = "In Progress";
       playButton.style.opacity = "0.4";
+    }
+
+    function unlockMainBegin(){
+      playButton.disabled = false;
+      playButton.textContent = "Begin";
+      playButton.style.opacity = "1";
     }
 
     function formatCountdown(ms){
@@ -522,7 +535,6 @@
       showPlayer();
       await audio.play();
 
-      lockBeginButton();
       waitingForManualStart = false;
       hideStartNow();
       setCountdown("");
@@ -537,6 +549,7 @@
       try{
         const started = await startPlaybackAtCurrentCorrectOffset();
         if(!started){
+          waitingForManualStart = true;
           showStartNow();
         }
       }catch(err){
@@ -588,7 +601,7 @@
         return;
       }
 
-      playButton.disabled = true;
+      lockMainBegin();
 
       try{
         ensureTrackAssigned();
@@ -616,16 +629,15 @@
           setStatus("Downloading…");
         }else{
           setCountdown("");
-          setStatus("Tap Begin");
           waitingForManualStart = true;
           showStartNow();
+          setStatus("Tap Begin");
           setDebug("Start time is already in the past; Begin will jump to the correct offset.");
         }
       }catch(err){
+        unlockMainBegin();
         setStatus("Audio source did not load");
         setDebug(`Load failed: ${err.message}`);
-      }finally{
-        playButton.disabled = false;
       }
     }
 
@@ -640,12 +652,16 @@
       try{
         const started = await startPlaybackAtCurrentCorrectOffset();
         if(!started){
+          waitingForManualStart = true;
           showStartNow();
+        }else{
+          lockMainBegin();
         }
       }catch(err){
+        waitingForManualStart = true;
+        showStartNow();
         setStatus("Start failed");
         setDebug(`Manual start failed: ${err.message}`);
-        showStartNow();
       }finally{
         startNowButton.disabled = false;
       }
@@ -693,7 +709,8 @@
     });
 
     audio.addEventListener("playing", ()=>{
-      lockBeginButton();
+      lockMainBegin();
+      hideStartNow();
 
       if(!isSoftCorrecting){
         setStatus("Playing");
@@ -714,10 +731,13 @@
       setStatus("Playback ended");
       setDebug("");
       showPlayer();
+      hideStartNow();
+      lockMainBegin();
       updateTransport();
     });
 
     audio.addEventListener("error", ()=>{
+      unlockMainBegin();
       setStatus("Audio failed to load");
       setDebug("Check custom domain, public bucket, CORS, and direct MP3 URL.");
     });
