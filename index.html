@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Common</title>
+  <title>common</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -21,23 +21,10 @@
     }
 
     .container{
-      position:relative;
       width:min(90vw,420px);
       display:grid;
       gap:16px;
       text-align:center;
-    }
-
-    .trackBadge{
-      position:absolute;
-      top:6px;
-      right:-12px;
-      font-size:.72rem;
-      color:#4a4a4a;
-      letter-spacing:.08em;
-      text-transform:lowercase;
-      user-select:none;
-      pointer-events:none;
     }
 
     .header{
@@ -51,6 +38,11 @@
       font-size:1.8rem;
       letter-spacing:.04em;
       font-weight:600;
+    }
+
+    .subtitle{
+      font-size:.9rem;
+      color:#aaa;
     }
 
     label{
@@ -113,7 +105,7 @@
     }
 
     .hidden{
-      display:none !important;
+      display:none;
     }
 
     audio{
@@ -125,10 +117,6 @@
       background:#222;
     }
 
-    input[type="datetime-local"]::-webkit-datetime-edit{
-      color:#fff;
-    }
-
     input[type="datetime-local"]::-webkit-calendar-picker-indicator{
       filter:invert(1);
     }
@@ -137,13 +125,12 @@
 
 <body>
   <main class="container">
-    <div id="trackBadge" class="trackBadge"></div>
-
     <div class="header">
-      <h1>Common</h1>
+      <h1>PRIME</h1>
+      <div class="subtitle">v1</div>
     </div>
 
-    <label for="startTime">Start Time (tap to set)</label>
+    <label for="startTime">Start Time</label>
     <input id="startTime" type="datetime-local" step="1" />
 
     <button id="playButton">Begin</button>
@@ -154,22 +141,11 @@
     <div id="transport" class="transport">00:00 / 00:00</div>
     <div id="debug" class="debug"></div>
 
-    <audio
-      id="audio"
-      preload="none"
-      playsinline
-      class="hidden">
-    </audio>
+    <audio id="audio" preload="auto" playsinline class="hidden"></audio>
   </main>
 
   <script>
-    const TRACKS = {
-      a: "https://audio.eggtooth.xyz/track-a.mp3",
-      b: "https://audio.eggtooth.xyz/track-b.mp3",
-      c: "https://audio.eggtooth.xyz/track-c.mp3"
-    };
-
-    const STORAGE_KEY = "common_track_assignment";
+    const AUDIO_URL = "https://audio.eggtooth.xyz/coreymixtest1.mp3";
 
     const audio = document.getElementById("audio");
     const playButton = document.getElementById("playButton");
@@ -179,38 +155,39 @@
     const countdownEl = document.getElementById("countdown");
     const transportEl = document.getElementById("transport");
     const debugEl = document.getElementById("debug");
-    const trackBadgeEl = document.getElementById("trackBadge");
 
+    let countdownFrame = null;
     let countdownTimer = null;
-    let countdownInterval = null;
+    let readinessInterval = null;
     let driftInterval = null;
+    let transportInterval = null;
 
     let scheduledAnchorMs = null;
-    let isSoftCorrecting = false;
     let sourceAssigned = false;
     let waitingForManualStart = false;
-    let assignedTrack = null;
-    let activeAudioUrl = null;
+    let startAttempted = false;
+    let isCorrecting = false;
+    let lastDriftSec = 0;
 
-    const DRIFT_CHECK_MS = 5000;
-    const DRIFT_THRESHOLD_SEC = 1.5;
-    const DRIFT_RECOVER_SEC = 0.35;
-    const SOFT_RATE_FAST = 1.03;
-    const SOFT_RATE_SLOW = 0.97;
+    const START_BUFFER_SEC = 4;
+    const READINESS_CHECK_MS = 200;
+    const DRIFT_CHECK_MS = 250;
+    const TRANSPORT_UPDATE_MS = 250;
+
+    const SOFT_DRIFT_THRESHOLD_SEC = 0.08;
+    const DRIFT_RECOVER_SEC = 0.035;
+    const HARD_SEEK_THRESHOLD_SEC = 0.45;
+
     const NORMAL_RATE = 1.0;
-    const START_BUFFER_SEC = 2;
+    const MAX_RATE_ADJUST = 0.035;
 
-    function setStatus(msg){
-      statusEl.textContent = msg;
+    function highResNowMs(){
+      return performance.timeOrigin + performance.now();
     }
 
-    function setCountdown(msg){
-      countdownEl.textContent = msg;
-    }
-
-    function setDebug(msg){
-      debugEl.textContent = msg || "";
-    }
+    function setStatus(msg){ statusEl.textContent = msg; }
+    function setCountdown(msg){ countdownEl.textContent = msg; }
+    function setDebug(msg){ debugEl.textContent = msg || ""; }
 
     function showPlayer(){
       audio.classList.remove("hidden");
@@ -222,32 +199,21 @@
       audio.controls = false;
     }
 
-    function showMainBegin(){
-      playButton.classList.remove("hidden");
-    }
-
-    function hideMainBegin(){
-      playButton.classList.add("hidden");
-    }
-
-    function showStartNow(){
-      startNowButton.classList.remove("hidden");
-      hideMainBegin();
-    }
-
-    function hideStartNow(){
-      startNowButton.classList.add("hidden");
-      showMainBegin();
-    }
+    function showStartNow(){ startNowButton.classList.remove("hidden"); }
+    function hideStartNow(){ startNowButton.classList.add("hidden"); }
 
     function clearTimers(){
-      if(countdownInterval){
-        clearInterval(countdownInterval);
-        countdownInterval = null;
+      if(countdownFrame){
+        cancelAnimationFrame(countdownFrame);
+        countdownFrame = null;
       }
       if(countdownTimer){
         clearTimeout(countdownTimer);
         countdownTimer = null;
+      }
+      if(readinessInterval){
+        clearInterval(readinessInterval);
+        readinessInterval = null;
       }
     }
 
@@ -256,135 +222,58 @@
         clearInterval(driftInterval);
         driftInterval = null;
       }
+      if(transportInterval){
+        clearInterval(transportInterval);
+        transportInterval = null;
+      }
     }
 
     function resetPlaybackRate(){
       audio.playbackRate = NORMAL_RATE;
-      isSoftCorrecting = false;
-    }
-
-    function getQueryParam(name){
-      const params = new URLSearchParams(window.location.search);
-      return params.get(name);
-    }
-
-    function clearStoredTrack(){
-      try{
-        localStorage.removeItem(STORAGE_KEY);
-      }catch(err){}
-    }
-
-    function getStoredTrack(){
-      try{
-        const value = localStorage.getItem(STORAGE_KEY);
-        if(value && TRACKS[value]) return value;
-      }catch(err){}
-      return null;
-    }
-
-    function storeTrack(track){
-      try{
-        localStorage.setItem(STORAGE_KEY, track);
-      }catch(err){}
-    }
-
-    function randomTrack(){
-      const keys = Object.keys(TRACKS);
-      return keys[Math.floor(Math.random() * keys.length)];
-    }
-
-    function updateTrackBadge(){
-      trackBadgeEl.textContent = assignedTrack ? assignedTrack : "";
-    }
-
-    function resolveTrackAssignment(){
-      const reset = getQueryParam("resetTrack");
-      if(reset === "1"){
-        clearStoredTrack();
-      }
-
-      const forced = getQueryParam("track");
-      if(forced && TRACKS[forced]){
-        assignedTrack = forced;
-        activeAudioUrl = TRACKS[forced];
-        updateTrackBadge();
-        return assignedTrack;
-      }
-
-      const stored = getStoredTrack();
-      if(stored && TRACKS[stored]){
-        assignedTrack = stored;
-        activeAudioUrl = TRACKS[stored];
-        updateTrackBadge();
-        return assignedTrack;
-      }
-
-      updateTrackBadge();
-      return null;
-    }
-
-    function ensureTrackAssigned(){
-      if(assignedTrack && TRACKS[assignedTrack]){
-        activeAudioUrl = TRACKS[assignedTrack];
-        updateTrackBadge();
-        return assignedTrack;
-      }
-
-      const track = randomTrack();
-      assignedTrack = track;
-      activeAudioUrl = TRACKS[track];
-      storeTrack(track);
-      updateTrackBadge();
-      return track;
-    }
-
-    function resetAudioSourceState(){
-      sourceAssigned = false;
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-      updateTransport();
+      isCorrecting = false;
     }
 
     function assignSourceIfNeeded(){
       if(sourceAssigned) return;
-      if(!activeAudioUrl){
-        throw new Error("No track audio assigned");
-      }
-      audio.src = activeAudioUrl;
+      audio.src = AUDIO_URL;
+      audio.preload = "auto";
       sourceAssigned = true;
     }
 
-    function lockMainBegin(){
+    function lockBeginButton(){
       playButton.disabled = true;
       playButton.textContent = "In Progress";
       playButton.style.opacity = "0.4";
     }
 
-    function unlockMainBegin(){
+    function unlockBeginButton(){
       playButton.disabled = false;
       playButton.textContent = "Begin";
       playButton.style.opacity = "1";
     }
 
     function formatCountdown(ms){
-      const s = Math.ceil(ms / 1000);
-      const m = Math.floor(s / 60);
-      const sec = s % 60;
-      return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+      const totalTenths = Math.max(0, Math.ceil(ms / 100));
+      const totalSeconds = Math.floor(totalTenths / 10);
+      const tenths = totalTenths % 10;
+      const m = Math.floor(totalSeconds / 60);
+      const sec = totalSeconds % 60;
+      return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${tenths}`;
     }
 
     function formatClockTime(sec){
-      sec = Math.max(0, Math.floor(sec));
-      const m = Math.floor(sec / 60);
-      const s = sec % 60;
+      sec = Math.max(0, sec || 0);
+      const whole = Math.floor(sec);
+      const m = Math.floor(whole / 60);
+      const s = whole % 60;
       return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
     }
 
     function updateTransport(){
       const current = audio.currentTime || 0;
-      const duration = (isFinite(audio.duration) && audio.duration > 0) ? audio.duration : 0;
-      transportEl.textContent = `${formatClockTime(current)} / ${formatClockTime(duration)}`;
+      const duration = isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+      const driftMs = Math.round(lastDriftSec * 1000);
+      transportEl.textContent = `${formatClockTime(current)} / ${formatClockTime(duration)} · drift ${driftMs} ms`;
     }
 
     async function ensureMetadata(timeoutMs = 30000){
@@ -432,6 +321,22 @@
       });
     }
 
+    async function primeAudioElement(){
+      try{
+        assignSourceIfNeeded();
+        audio.muted = true;
+        await audio.play();
+        audio.pause();
+        audio.currentTime = 0;
+        audio.muted = false;
+        await waitForSeek();
+        return true;
+      }catch(err){
+        audio.muted = false;
+        return false;
+      }
+    }
+
     function startDownload(){
       assignSourceIfNeeded();
       audio.preload = "auto";
@@ -446,7 +351,7 @@
           const start = audio.buffered.start(i);
           const end = audio.buffered.end(i);
 
-          if(targetTimeSec >= start && targetTimeSec <= end - 0.25){
+          if(targetTimeSec >= start && targetTimeSec <= end - 0.15){
             return true;
           }
         }
@@ -469,45 +374,60 @@
 
     function getExpectedTrackTimeSec(){
       if(scheduledAnchorMs == null) return null;
-      return Math.max(0, (Date.now() - scheduledAnchorMs) / 1000);
+      return Math.max(0, (highResNowMs() - scheduledAnchorMs) / 1000);
     }
 
-    function updateCorrectionStatus(driftSec){
+    function getCurrentDriftSec(){
+      const expected = getExpectedTrackTimeSec();
+      if(expected == null) return 0;
+      return expected - audio.currentTime;
+    }
+
+    function clamp(value, min, max){
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function updateCorrectionStatus(){
+      if(audio.paused || audio.ended || scheduledAnchorMs == null) return;
+
+      const driftSec = getCurrentDriftSec();
+      lastDriftSec = driftSec;
       const abs = Math.abs(driftSec);
 
-      if(abs < DRIFT_THRESHOLD_SEC){
-        if(isSoftCorrecting && abs <= DRIFT_RECOVER_SEC){
+      if(abs >= HARD_SEEK_THRESHOLD_SEC){
+        const expected = getExpectedTrackTimeSec();
+        if(expected != null && expected < audio.duration){
+          audio.currentTime = expected;
           resetPlaybackRate();
-          setStatus("Playing");
-          updateTransport();
+          setStatus(`Hard sync correction (${Math.round(driftSec * 1000)} ms)`);
         }
+        updateTransport();
         return;
       }
 
-      if(driftSec > 0){
-        audio.playbackRate = SOFT_RATE_FAST;
-        isSoftCorrecting = true;
-        setStatus(`Soft catch-up correction (${driftSec.toFixed(2)}s late)`);
-      }else{
-        audio.playbackRate = SOFT_RATE_SLOW;
-        isSoftCorrecting = true;
-        setStatus(`Soft slow-down correction (${Math.abs(driftSec).toFixed(2)}s early)`);
+      if(abs <= DRIFT_RECOVER_SEC){
+        if(isCorrecting){
+          resetPlaybackRate();
+          setStatus("Playing");
+        }
+        updateTransport();
+        return;
       }
+
+      if(abs >= SOFT_DRIFT_THRESHOLD_SEC){
+        const adjust = clamp(driftSec * 0.08, -MAX_RATE_ADJUST, MAX_RATE_ADJUST);
+        audio.playbackRate = NORMAL_RATE + adjust;
+        isCorrecting = true;
+        setStatus(`Sync correction (${Math.round(driftSec * 1000)} ms)`);
+      }
+
+      updateTransport();
     }
 
     function beginDriftMonitor(){
       clearDriftMonitor();
-
-      driftInterval = setInterval(()=>{
-        if(audio.paused || audio.ended) return;
-        if(scheduledAnchorMs == null) return;
-
-        const expected = getExpectedTrackTimeSec();
-        if(expected == null) return;
-
-        const driftSec = expected - audio.currentTime;
-        updateCorrectionStatus(driftSec);
-      }, DRIFT_CHECK_MS);
+      driftInterval = setInterval(updateCorrectionStatus, DRIFT_CHECK_MS);
+      transportInterval = setInterval(updateTransport, TRANSPORT_UPDATE_MS);
     }
 
     async function startPlaybackAtCurrentCorrectOffset(){
@@ -517,7 +437,7 @@
 
       await ensureMetadata();
 
-      const offsetSec = Math.max(0, (Date.now() - scheduledAnchorMs) / 1000);
+      const offsetSec = Math.max(0, (highResNowMs() - scheduledAnchorMs) / 1000);
 
       if(!hasEnoughToStartAt(offsetSec)){
         setStatus("Preparing audio…");
@@ -535,24 +455,33 @@
       showPlayer();
       await audio.play();
 
+      lockBeginButton();
       waitingForManualStart = false;
+      startAttempted = true;
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
       setDebug("");
+      lastDriftSec = getCurrentDriftSec();
       updateTransport();
       beginDriftMonitor();
       return true;
     }
 
     async function tryAutomaticStart(){
+      if(startAttempted) return;
+      startAttempted = true;
+
       try{
         const started = await startPlaybackAtCurrentCorrectOffset();
         if(!started){
+          startAttempted = false;
           waitingForManualStart = true;
           showStartNow();
+          setStatus("Ready — tap Begin");
         }
       }catch(err){
+        startAttempted = false;
         waitingForManualStart = true;
         showStartNow();
         setStatus("Tap Begin");
@@ -562,9 +491,19 @@
 
     function beginCountdown(startTimeMs){
       clearTimers();
+      startAttempted = false;
 
-      function update(){
-        const remaining = startTimeMs - Date.now();
+      readinessInterval = setInterval(()=>{
+        const offsetSec = Math.max(0, (highResNowMs() - startTimeMs) / 1000);
+        if(hasEnoughToStartAt(offsetSec)){
+          setDebug("Audio ready for scheduled start.");
+        }else{
+          setDebug("Preloading audio for scheduled start…");
+        }
+      }, READINESS_CHECK_MS);
+
+      function updateCountdown(){
+        const remaining = startTimeMs - highResNowMs();
 
         if(remaining <= 0){
           clearTimers();
@@ -575,17 +514,16 @@
 
         setCountdown(`Starting in ${formatCountdown(remaining)}`);
         setStatus("Downloading…");
+        countdownFrame = requestAnimationFrame(updateCountdown);
       }
 
-      update();
-
-      countdownInterval = setInterval(update, 250);
+      updateCountdown();
 
       countdownTimer = setTimeout(()=>{
         clearTimers();
         setCountdown("Starting now");
         tryAutomaticStart();
-      }, Math.max(0, startTimeMs - Date.now()));
+      }, Math.max(0, startTimeMs - highResNowMs()));
     }
 
     async function handlePrepare(){
@@ -594,6 +532,8 @@
       resetPlaybackRate();
       hideStartNow();
       waitingForManualStart = false;
+      startAttempted = false;
+      lastDriftSec = 0;
       setDebug("");
 
       if(!startInput.value){
@@ -601,17 +541,14 @@
         return;
       }
 
-      lockMainBegin();
+      if(!AUDIO_URL.startsWith("http")){
+        setStatus("Add your audio URL first");
+        return;
+      }
+
+      playButton.disabled = true;
 
       try{
-        ensureTrackAssigned();
-
-        if(!activeAudioUrl || !activeAudioUrl.startsWith("http")){
-          setStatus("Add your track audio URLs first");
-          return;
-        }
-
-        resetAudioSourceState();
         hidePlayer();
         startDownload();
         setStatus("Downloading…");
@@ -619,8 +556,10 @@
         await ensureMetadata();
         updateTransport();
 
+        await primeAudioElement();
+
         const startTimeMs = new Date(startInput.value).getTime();
-        const offsetSec = (Date.now() - startTimeMs) / 1000;
+        const offsetSec = (highResNowMs() - startTimeMs) / 1000;
 
         scheduledAnchorMs = startTimeMs;
 
@@ -629,15 +568,18 @@
           setStatus("Downloading…");
         }else{
           setCountdown("");
+          setStatus("Tap Begin");
           waitingForManualStart = true;
           showStartNow();
-          setStatus("Tap Begin");
           setDebug("Start time is already in the past; Begin will jump to the correct offset.");
         }
       }catch(err){
-        unlockMainBegin();
         setStatus("Audio source did not load");
         setDebug(`Load failed: ${err.message}`);
+      }finally{
+        if(!startAttempted){
+          playButton.disabled = false;
+        }
       }
     }
 
@@ -652,16 +594,12 @@
       try{
         const started = await startPlaybackAtCurrentCorrectOffset();
         if(!started){
-          waitingForManualStart = true;
           showStartNow();
-        }else{
-          lockMainBegin();
         }
       }catch(err){
-        waitingForManualStart = true;
-        showStartNow();
         setStatus("Start failed");
         setDebug(`Manual start failed: ${err.message}`);
+        showStartNow();
       }finally{
         startNowButton.disabled = false;
       }
@@ -684,7 +622,7 @@
       updateTransport();
 
       if(waitingForManualStart && scheduledAnchorMs != null){
-        const offsetSec = Math.max(0, (Date.now() - scheduledAnchorMs) / 1000);
+        const offsetSec = Math.max(0, (highResNowMs() - scheduledAnchorMs) / 1000);
         if(hasEnoughToStartAt(offsetSec)){
           setStatus("Ready — tap Begin");
         }
@@ -695,7 +633,7 @@
       updateTransport();
 
       if(waitingForManualStart && scheduledAnchorMs != null){
-        const offsetSec = Math.max(0, (Date.now() - scheduledAnchorMs) / 1000);
+        const offsetSec = Math.max(0, (highResNowMs() - scheduledAnchorMs) / 1000);
         if(hasEnoughToStartAt(offsetSec)){
           setStatus("Ready — tap Begin");
         }
@@ -709,40 +647,36 @@
     });
 
     audio.addEventListener("playing", ()=>{
-      lockMainBegin();
-      hideStartNow();
+      lockBeginButton();
 
-      if(!isSoftCorrecting){
+      if(!isCorrecting){
         setStatus("Playing");
       }
+
       updateTransport();
     });
 
-    audio.addEventListener("pause", ()=>{
-      updateTransport();
-    });
+    audio.addEventListener("pause", updateTransport);
 
     audio.addEventListener("ended", ()=>{
       clearTimers();
       clearDriftMonitor();
       resetPlaybackRate();
       waitingForManualStart = false;
+      startAttempted = false;
       setCountdown("");
       setStatus("Playback ended");
       setDebug("");
       showPlayer();
-      hideStartNow();
-      lockMainBegin();
       updateTransport();
     });
 
     audio.addEventListener("error", ()=>{
-      unlockMainBegin();
       setStatus("Audio failed to load");
       setDebug("Check custom domain, public bucket, CORS, and direct MP3 URL.");
+      unlockBeginButton();
     });
 
-    resolveTrackAssignment();
     updateTransport();
   </script>
 </body>
