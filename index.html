@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3</div>
+      <div class="subtitle">v3.1</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -186,6 +186,13 @@
     let lastSeekBeforeSec = null;
     let lastSeekAfterSec = null;
     let lastSuccessfulHardSeekAtMs = null;
+    let lastSeekAfter1Sec = null;
+    let lastSeekAfter3Sec = null;
+    let seekSettlingToken = 0;
+    let samplesUnder150 = 0;
+    let samplesUnder250 = 0;
+    let samplesUnderThreshold = 0;
+    let samplesAtOrAboveThreshold = 0;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
@@ -197,7 +204,7 @@
     const DRIFT_CHECK_MS = 1000;
     const TRANSPORT_UPDATE_MS = 1000;
 
-    const HARD_SEEK_THRESHOLD_SEC = 0.25;
+    const HARD_SEEK_THRESHOLD_SEC = 0.35;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
@@ -366,23 +373,39 @@
       driftAbsSumSec += absDrift;
       bestAbsDriftSec = bestAbsDriftSec == null ? absDrift : Math.min(bestAbsDriftSec, absDrift);
       worstAbsDriftSec = worstAbsDriftSec == null ? absDrift : Math.max(worstAbsDriftSec, absDrift);
+
+      if(absDrift < 0.15) samplesUnder150 += 1;
+      if(absDrift < 0.25) samplesUnder250 += 1;
+      if(absDrift < HARD_SEEK_THRESHOLD_SEC){
+        samplesUnderThreshold += 1;
+      }else{
+        samplesAtOrAboveThreshold += 1;
+      }
     }
 
     function updateDriftStats(){
       const avgAbsSec = driftSampleCount > 0 ? driftAbsSumSec / driftSampleCount : null;
       const improvementSec = initialDriftSec == null ? null : Math.abs(initialDriftSec) - Math.abs(lastDriftSec);
       const improvementText = improvementSec == null ? "—" : `${Math.round(improvementSec * 1000)} ms`;
+      const pct = count => driftSampleCount > 0 ? `${Math.round((count / driftSampleCount) * 100)}%` : "—";
 
       let lastSeekText = "—";
       if(lastSeekBeforeSec != null && lastSeekAfterSec != null){
         lastSeekText = `${formatSignedMs(lastSeekBeforeSec)} → ${formatSignedMs(lastSeekAfterSec)} · ${formatElapsedSince(lastSuccessfulHardSeekAtMs)}`;
       }
 
+      let settlingText = "—";
+      if(lastSeekAfterSec != null){
+        settlingText = `immediate ${formatSignedMs(lastSeekAfterSec)} · 1s ${formatSignedMs(lastSeekAfter1Sec)} · 3s ${formatSignedMs(lastSeekAfter3Sec)}`;
+      }
+
       driftStatsEl.innerHTML =
         `Initial ${formatSignedMs(initialDriftSec)} · Avg ${avgAbsSec == null ? "—" : `${Math.round(avgAbsSec * 1000)} ms`} · ` +
         `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
-        `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}`;
+        `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
+        `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}<br>` +
+        `Post-seek settling: ${settlingText}`;
     }
 
     function resetDriftStats(){
@@ -395,6 +418,13 @@
       lastSeekBeforeSec = null;
       lastSeekAfterSec = null;
       lastSuccessfulHardSeekAtMs = null;
+      lastSeekAfter1Sec = null;
+      lastSeekAfter3Sec = null;
+      seekSettlingToken += 1;
+      samplesUnder150 = 0;
+      samplesUnder250 = 0;
+      samplesUnderThreshold = 0;
+      samplesAtOrAboveThreshold = 0;
       updateDriftStats();
     }
 
@@ -780,6 +810,22 @@
         lastSeekBeforeSec = preSeekDriftSec;
         lastSeekAfterSec = lastDriftSec;
         lastSuccessfulHardSeekAtMs = highResNowMs();
+        lastSeekAfter1Sec = null;
+        lastSeekAfter3Sec = null;
+        const thisSeekToken = ++seekSettlingToken;
+
+        setTimeout(()=>{
+          if(thisSeekToken !== seekSettlingToken || audio.paused || audio.ended) return;
+          lastSeekAfter1Sec = getCurrentDriftSec();
+          updateDriftStats();
+        }, 1000);
+
+        setTimeout(()=>{
+          if(thisSeekToken !== seekSettlingToken || audio.paused || audio.ended) return;
+          lastSeekAfter3Sec = getCurrentDriftSec();
+          updateDriftStats();
+        }, 3000);
+
         setStatus(reason);
         updateTransport();
         updateDriftStats();
