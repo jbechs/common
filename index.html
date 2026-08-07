@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3</div>
+      <div class="subtitle">v2</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -139,6 +139,7 @@
     <div id="countdown" class="countdown"></div>
     <div id="status" class="status">Ready.</div>
     <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
+    <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
     <div id="debug" class="debug"></div>
 
     <audio id="audio" preload="auto" playsinline class="hidden"></audio>
@@ -158,6 +159,7 @@
     const statusEl = document.getElementById("status");
     const countdownEl = document.getElementById("countdown");
     const transportEl = document.getElementById("transport");
+    const driftStatsEl = document.getElementById("driftStats");
     const debugEl = document.getElementById("debug");
 
     let countdownFrame = null;
@@ -175,6 +177,15 @@
     let startAttempted = false;
     let lastDriftSec = 0;
     let lastHardSeekAtMs = 0;
+    let initialDriftSec = null;
+    let driftSampleCount = 0;
+    let driftAbsSumSec = 0;
+    let bestAbsDriftSec = null;
+    let worstAbsDriftSec = null;
+    let hardSeekCount = 0;
+    let lastSeekBeforeSec = null;
+    let lastSeekAfterSec = null;
+    let lastSuccessfulHardSeekAtMs = null;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
@@ -186,7 +197,7 @@
     const DRIFT_CHECK_MS = 1000;
     const TRANSPORT_UPDATE_MS = 1000;
 
-    const HARD_SEEK_THRESHOLD_SEC = 0.35;
+    const HARD_SEEK_THRESHOLD_SEC = 0.25;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
@@ -327,6 +338,64 @@
 
       transportEl.textContent =
         `${formatClockTime(current)} / ${formatClockTime(duration)} · drift ${driftMs} ms`;
+    }
+
+    function formatSignedMs(sec){
+      if(sec == null) return "—";
+      const ms = Math.round(sec * 1000);
+      return `${ms > 0 ? "+" : ""}${ms} ms`;
+    }
+
+    function formatElapsedSince(ms){
+      if(ms == null) return "—";
+      const totalSec = Math.max(0, Math.floor((highResNowMs() - ms) / 1000));
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      return m > 0 ? `${m}m ${s}s ago` : `${s}s ago`;
+    }
+
+    function recordDriftSample(driftSec){
+      if(!isFinite(driftSec)) return;
+
+      if(initialDriftSec == null){
+        initialDriftSec = driftSec;
+      }
+
+      const absDrift = Math.abs(driftSec);
+      driftSampleCount += 1;
+      driftAbsSumSec += absDrift;
+      bestAbsDriftSec = bestAbsDriftSec == null ? absDrift : Math.min(bestAbsDriftSec, absDrift);
+      worstAbsDriftSec = worstAbsDriftSec == null ? absDrift : Math.max(worstAbsDriftSec, absDrift);
+    }
+
+    function updateDriftStats(){
+      const avgAbsSec = driftSampleCount > 0 ? driftAbsSumSec / driftSampleCount : null;
+      const improvementSec = initialDriftSec == null ? null : Math.abs(initialDriftSec) - Math.abs(lastDriftSec);
+      const improvementText = improvementSec == null ? "—" : `${Math.round(improvementSec * 1000)} ms`;
+
+      let lastSeekText = "—";
+      if(lastSeekBeforeSec != null && lastSeekAfterSec != null){
+        lastSeekText = `${formatSignedMs(lastSeekBeforeSec)} → ${formatSignedMs(lastSeekAfterSec)} · ${formatElapsedSince(lastSuccessfulHardSeekAtMs)}`;
+      }
+
+      driftStatsEl.innerHTML =
+        `Initial ${formatSignedMs(initialDriftSec)} · Avg ${avgAbsSec == null ? "—" : `${Math.round(avgAbsSec * 1000)} ms`} · ` +
+        `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
+        `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
+        `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}`;
+    }
+
+    function resetDriftStats(){
+      initialDriftSec = null;
+      driftSampleCount = 0;
+      driftAbsSumSec = 0;
+      bestAbsDriftSec = null;
+      worstAbsDriftSec = null;
+      hardSeekCount = 0;
+      lastSeekBeforeSec = null;
+      lastSeekAfterSec = null;
+      lastSuccessfulHardSeekAtMs = null;
+      updateDriftStats();
     }
 
     async function syncServerClock(samples = 5){
@@ -694,11 +763,11 @@
       return expected - audio.currentTime;
     }
 
-    async function hardSyncToExpectedTime(reason){
+    async function hardSyncToExpectedTime(reason, preSeekDriftSec){
       const expected = getExpectedTrackTimeSec();
 
-      if(expected == null) return;
-      if(!isFinite(audio.duration) || expected >= audio.duration) return;
+      if(expected == null) return false;
+      if(!isFinite(audio.duration) || expected >= audio.duration) return false;
 
       const bufferedEnd = getBufferedEndFor(expected);
 
@@ -707,11 +776,18 @@
         await waitForSeek();
 
         lastDriftSec = getCurrentDriftSec();
+        hardSeekCount += 1;
+        lastSeekBeforeSec = preSeekDriftSec;
+        lastSeekAfterSec = lastDriftSec;
+        lastSuccessfulHardSeekAtMs = highResNowMs();
         setStatus(reason);
         updateTransport();
+        updateDriftStats();
+        return true;
       }else{
         setStatus("Sync delayed — buffering");
         setDebug(`Need audio near ${formatClockTime(expected)} before correcting.`);
+        return false;
       }
     }
 
@@ -720,13 +796,18 @@
 
       const driftSec = getCurrentDriftSec();
       lastDriftSec = driftSec;
+      recordDriftSample(driftSec);
+      updateDriftStats();
 
       const nowMs = highResNowMs();
       const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
 
       if(Math.abs(driftSec) >= HARD_SEEK_THRESHOLD_SEC && cooldownElapsed){
         lastHardSeekAtMs = nowMs;
-        hardSyncToExpectedTime(`Seek correction (${Math.round(driftSec * 1000)} ms)`);
+        hardSyncToExpectedTime(
+          `Seek correction (${Math.round(driftSec * 1000)} ms)`,
+          driftSec
+        );
       }else{
         setStatus("Playing");
         updateTransport();
@@ -899,6 +980,7 @@
       startAttempted = false;
       lastDriftSec = 0;
       lastHardSeekAtMs = 0;
+      resetDriftStats();
       audio.volume = MAIN_VOLUME;
 
       setDebug("");
@@ -1072,6 +1154,7 @@
     });
 
     updateTransport();
+    updateDriftStats();
   </script>
 </body>
 </html>
