@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.7</div>
+      <div class="subtitle">v3.8</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -229,7 +229,8 @@
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const HARD_SEEK_MAX_COUNT = 6;
     const NORMAL_RATE = 1.0;
-    const INTERRUPTION_RECOVERY_DELAY_MS = 700;
+    const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
+    const INTERRUPTION_VERIFY_DELAY_MS = 500;
 
     const PRESHOW_VOLUME = 1.0;
     const MAIN_VOLUME = 1.0;
@@ -1044,15 +1045,33 @@
 
     function scheduleAutomaticInterruptionRecovery(reason = "Audio interrupted"){
       if(!performanceShouldBePlaying() || !audio.paused || interruptionRecoveryInFlight) return;
-      if(interruptionAwaitingTap && document.visibilityState === "visible") return;
 
+      // v3.8 rule: there is no indefinite recovery state. If the page is visible,
+      // give the OS/audio route a short grace period, attempt one canonical-timeline
+      // rejoin, then fall back to a Resume tap if playback still is not advancing.
       clearInterruptionRecoveryTimer();
+      interruptionAwaitingTap = false;
+      hideStartNow();
       setStatus(`${reason} — recovering…`);
 
-      interruptionRecoveryTimer = setTimeout(()=>{
+      interruptionRecoveryTimer = setTimeout(async ()=>{
         interruptionRecoveryTimer = null;
-        if(!performanceShouldBePlaying() || !audio.paused) return;
-        recoverInterruptedPlayback(false);
+        if(!performanceShouldBePlaying()) return;
+        if(!audio.paused) return;
+
+        const recovered = await recoverInterruptedPlayback(false);
+        if(recovered){
+          // A resolved play() promise is encouraging, but verify that the media
+          // element actually remains in a playing state after the route settles.
+          interruptionRecoveryTimer = setTimeout(()=>{
+            interruptionRecoveryTimer = null;
+            if(performanceShouldBePlaying() && audio.paused){
+              offerResumeAfterInterruption("Audio interrupted");
+            }
+          }, INTERRUPTION_VERIFY_DELAY_MS);
+        }else if(performanceShouldBePlaying()){
+          offerResumeAfterInterruption("Audio interrupted");
+        }
       }, INTERRUPTION_RECOVERY_DELAY_MS);
     }
 
@@ -1063,13 +1082,15 @@
       interruptionCount += 1;
       updateDriftStats();
 
-      // A visible-page pause can be an audio-route loss. Auto-resuming here could
-      // unexpectedly blast the soundtrack through the phone speaker, so require
-      // one deliberate tap. If the page is hidden (e.g. phone call/app interruption),
-      // preserve the clock and attempt an automatic rejoin when the page returns.
+      // If an OS-level interruption temporarily hides the page (phone call,
+      // audio-route picker, etc.), preserve the canonical timeline and wait only
+      // until the page is visible again. The visibility handler then starts the
+      // bounded recovery watchdog. A visible-page route loss still gets the safe
+      // one-tap Resume immediately so audio cannot unexpectedly jump to speakers.
       if(document.visibilityState === "hidden"){
-        interruptionAwaitingTap = true;
-        setStatus("Audio interrupted — waiting to recover");
+        interruptionAwaitingTap = false;
+        clearInterruptionRecoveryTimer();
+        setStatus("Audio interrupted — recovery pending");
         return;
       }
 
@@ -1095,7 +1116,7 @@
 
       await ensureMetadata();
 
-      // Performance lock: from this point forward the synchronized show clock
+      // Performance lock: from this point forward the canonical timeline
       // is derived from the last good server offset plus performance.now().
       // Network changes cannot alter the show timeline.
       freezePerformanceClock();
