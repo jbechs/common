@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.1</div>
+      <div class="subtitle">v3.1 EXP</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -196,6 +196,10 @@
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
+    let calibrationResultsMs = [];
+    let calibrationStatus = "not run";
+    let calibrationAccepted = false;
+
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
     const SEEK_PLAYABLE_TIMEOUT_MS = 12000;
@@ -207,6 +211,15 @@
     const HARD_SEEK_THRESHOLD_SEC = 0.35;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
+
+    // Experimental pre-show startup calibration.
+    // The main track is run muted against a temporary wall-clock anchor.
+    // If the measured operating point is poor, the media pipeline is rebuilt
+    // at most twice before the show. In-show behavior remains identical to v3.1.
+    const CALIBRATION_ACCEPT_MS = 350;
+    const CALIBRATION_SAMPLE_MS = 4000;
+    const CALIBRATION_MAX_REINITIALIZATIONS = 2;
+    const CALIBRATION_START_GUARD_MS = 8000;
 
     const PRESHOW_VOLUME = 1.0;
     const MAIN_VOLUME = 1.0;
@@ -405,7 +418,8 @@
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
         `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}<br>` +
-        `Post-seek settling: ${settlingText}`;
+        `Post-seek settling: ${settlingText}<br>` +
+        `Startup calibration: ${calibrationStatus}`;
     }
 
     function resetDriftStats(){
@@ -425,6 +439,9 @@
       samplesUnder250 = 0;
       samplesUnderThreshold = 0;
       samplesAtOrAboveThreshold = 0;
+      calibrationResultsMs = [];
+      calibrationStatus = "not run";
+      calibrationAccepted = false;
       updateDriftStats();
     }
 
@@ -650,6 +667,119 @@
         audio.muted = false;
         return false;
       }
+    }
+
+    function formatCalibrationResults(){
+      if(calibrationResultsMs.length === 0) return "not run";
+      return calibrationResultsMs
+        .map((ms, index)=>`#${index + 1} ${ms >= 0 ? "+" : ""}${ms} ms`)
+        .join(" · ");
+    }
+
+    async function rebuildMainAudioPipeline(){
+      try{
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+        sourceAssigned = false;
+
+        assignSourceIfNeeded();
+        await ensureMetadata();
+        await primeAudioElement();
+        return true;
+      }catch(err){
+        return false;
+      }
+    }
+
+    async function runMutedCalibrationSample(){
+      await ensureMetadata();
+
+      audio.pause();
+      resetPlaybackRate();
+      audio.volume = 0;
+      audio.muted = true;
+
+      try{
+        audio.currentTime = 0;
+        await waitForSeek();
+
+        const wallStartMs = syncedNowMs();
+        const mediaStartSec = audio.currentTime || 0;
+
+        await audio.play();
+        await new Promise(resolve => setTimeout(resolve, CALIBRATION_SAMPLE_MS));
+
+        const wallElapsedSec = (syncedNowMs() - wallStartMs) / 1000;
+        const mediaElapsedSec = (audio.currentTime || 0) - mediaStartSec;
+        const measuredDriftMs = Math.round((wallElapsedSec - mediaElapsedSec) * 1000);
+
+        audio.pause();
+        audio.currentTime = 0;
+        await waitForSeek();
+
+        return measuredDriftMs;
+      }finally{
+        audio.pause();
+        audio.muted = false;
+        audio.volume = MAIN_VOLUME;
+      }
+    }
+
+    async function runStartupCalibration(startTimeMs){
+      calibrationResultsMs = [];
+      calibrationStatus = "measuring…";
+      calibrationAccepted = false;
+      updateDriftStats();
+
+      for(let attempt = 0; attempt <= CALIBRATION_MAX_REINITIALIZATIONS; attempt++){
+        const timeRemainingMs = startTimeMs - syncedNowMs();
+        if(timeRemainingMs <= CALIBRATION_SAMPLE_MS + CALIBRATION_START_GUARD_MS){
+          calibrationStatus = calibrationResultsMs.length
+            ? `${formatCalibrationResults()} · stopped for start-time guard`
+            : "skipped — start too close";
+          updateDriftStats();
+          return false;
+        }
+
+        setStatus(`Calibrating audio… ${attempt + 1}/${CALIBRATION_MAX_REINITIALIZATIONS + 1}`);
+
+        let measuredMs;
+        try{
+          measuredMs = await runMutedCalibrationSample();
+        }catch(err){
+          calibrationStatus = calibrationResultsMs.length
+            ? `${formatCalibrationResults()} · calibration stopped (${err.message})`
+            : `unavailable (${err.message})`;
+          updateDriftStats();
+          return false;
+        }
+
+        calibrationResultsMs.push(measuredMs);
+
+        if(Math.abs(measuredMs) < CALIBRATION_ACCEPT_MS){
+          calibrationAccepted = true;
+          calibrationStatus = `${formatCalibrationResults()} · accepted`;
+          updateDriftStats();
+          return true;
+        }
+
+        calibrationStatus = `${formatCalibrationResults()} · rerolling…`;
+        updateDriftStats();
+
+        if(attempt < CALIBRATION_MAX_REINITIALIZATIONS){
+          const rebuilt = await rebuildMainAudioPipeline();
+          if(!rebuilt){
+            calibrationStatus = `${formatCalibrationResults()} · rebuild unavailable`;
+            updateDriftStats();
+            return false;
+          }
+        }
+      }
+
+      calibrationStatus = `${formatCalibrationResults()} · final state accepted`;
+      updateDriftStats();
+      return false;
     }
 
     function startDownload(){
@@ -1064,6 +1194,11 @@
 
         if(offsetSec < 0){
           await startPreshowLoop();
+
+          // Experimental: while the audible preshow continues, silently sample
+          // the main audio pipeline and allow up to two bounded reinitializations.
+          await runStartupCalibration(startTimeMs);
+
           beginCountdown(startTimeMs);
           setStatus(preshowPlaying ? "Pre-show playing…" : "Downloading…");
         }else{
