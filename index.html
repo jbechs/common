@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.4</div>
+      <div class="subtitle">v3.5</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -212,10 +212,10 @@
     // Production philosophy (Aug 2026): minimum intervention + network indifference.
     // Normal media URL remains intact; the browser is allowed to warm its own media cache/buffer.
     // 350 ms remains the preferred operating band for diagnostics.
-    // A hard seek now requires a sustained poor state: >=400 ms for
+    // A hard seek now requires a sustained poor state: >=420 ms for
     // three consecutive 1-second checks, plus the existing cooldown.
     const PREFERRED_DRIFT_BAND_SEC = 0.35;
-    const HARD_SEEK_TRIGGER_SEC = 0.40;
+    const HARD_SEEK_TRIGGER_SEC = 0.42;
     const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
@@ -436,7 +436,7 @@
         `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
-        `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥400 ms) · Hard seeks ${hardSeekCount}<br>` +
+        `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥420 ms) · Hard seeks ${hardSeekCount}<br>` +
         `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
@@ -1299,5 +1299,4 @@
   </script>
 </body>
 </html>
-
 
