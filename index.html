@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.2</div>
+      <div class="subtitle">v3.3</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -193,6 +193,7 @@
     let samplesUnder250 = 0;
     let samplesUnderThreshold = 0;
     let samplesAtOrAboveThreshold = 0;
+    let sustainedBadStreak = 0;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
@@ -205,9 +206,12 @@
     const TRANSPORT_UPDATE_MS = 1000;
 
     // Production philosophy (Aug 2026): minimum intervention.
-    // Preserve continuous playback whenever possible; correct only when
-    // reported drift exceeds the tested 350 ms guardrail.
-    const HARD_SEEK_THRESHOLD_SEC = 0.35;
+    // 350 ms remains the preferred operating band for diagnostics.
+    // A hard seek now requires a sustained poor state: >=400 ms for
+    // three consecutive 1-second checks, plus the existing cooldown.
+    const PREFERRED_DRIFT_BAND_SEC = 0.35;
+    const HARD_SEEK_TRIGGER_SEC = 0.40;
+    const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
@@ -379,7 +383,7 @@
 
       if(absDrift < 0.15) samplesUnder150 += 1;
       if(absDrift < 0.25) samplesUnder250 += 1;
-      if(absDrift < HARD_SEEK_THRESHOLD_SEC){
+      if(absDrift < PREFERRED_DRIFT_BAND_SEC){
         samplesUnderThreshold += 1;
       }else{
         samplesAtOrAboveThreshold += 1;
@@ -407,7 +411,8 @@
         `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
-        `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}<br>` +
+        `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥400 ms) · Hard seeks ${hardSeekCount}<br>` +
+        `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
 
@@ -428,6 +433,7 @@
       samplesUnder250 = 0;
       samplesUnderThreshold = 0;
       samplesAtOrAboveThreshold = 0;
+      sustainedBadStreak = 0;
       updateDriftStats();
     }
 
@@ -848,13 +854,23 @@
       recordDriftSample(driftSec);
       updateDriftStats();
 
+      const absDriftSec = Math.abs(driftSec);
+      if(absDriftSec >= HARD_SEEK_TRIGGER_SEC){
+        sustainedBadStreak += 1;
+      }else{
+        sustainedBadStreak = 0;
+      }
+      updateDriftStats();
+
       const nowMs = highResNowMs();
       const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
+      const sustainedBadState = sustainedBadStreak >= HARD_SEEK_REQUIRED_CHECKS;
 
-      if(Math.abs(driftSec) >= HARD_SEEK_THRESHOLD_SEC && cooldownElapsed){
+      if(sustainedBadState && cooldownElapsed){
         lastHardSeekAtMs = nowMs;
+        sustainedBadStreak = 0;
         hardSyncToExpectedTime(
-          `Seek correction (${Math.round(driftSec * 1000)} ms)`,
+          `Seek correction after sustained drift (${Math.round(driftSec * 1000)} ms)`,
           driftSec
         );
       }else{
@@ -1207,4 +1223,3 @@
   </script>
 </body>
 </html>
-
