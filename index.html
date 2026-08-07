@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.1 EXP</div>
+      <div class="subtitle">v3.1 EXP-B · startup calibration</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -196,7 +196,7 @@
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
-    let calibrationResultsMs = [];
+    let calibrationAttempts = [];
     let calibrationStatus = "not run";
     let calibrationAccepted = false;
 
@@ -220,6 +220,7 @@
     const CALIBRATION_SAMPLE_MS = 4000;
     const CALIBRATION_MAX_REINITIALIZATIONS = 2;
     const CALIBRATION_START_GUARD_MS = 8000;
+    const CALIBRATION_REBUILD_SETTLE_MS = 350;
 
     const PRESHOW_VOLUME = 1.0;
     const MAIN_VOLUME = 1.0;
@@ -439,7 +440,7 @@
       samplesUnder250 = 0;
       samplesUnderThreshold = 0;
       samplesAtOrAboveThreshold = 0;
-      calibrationResultsMs = [];
+      calibrationAttempts = [];
       calibrationStatus = "not run";
       calibrationAccepted = false;
       updateDriftStats();
@@ -669,25 +670,39 @@
       }
     }
 
-    function formatCalibrationResults(){
-      if(calibrationResultsMs.length === 0) return "not run";
-      return calibrationResultsMs
-        .map((ms, index)=>`#${index + 1} ${ms >= 0 ? "+" : ""}${ms} ms`)
+    function formatCalibrationAttempts(){
+      if(calibrationAttempts.length === 0) return "not run";
+      return calibrationAttempts
+        .map(item => {
+          const signed = `${item.measuredMs >= 0 ? "+" : ""}${item.measuredMs} ms`;
+          return `#${item.attempt} ${signed} → ${item.decision}`;
+        })
         .join(" · ");
     }
 
     async function rebuildMainAudioPipeline(){
       try{
         audio.pause();
+        audio.muted = true;
+        audio.volume = 0;
+
+        // Deeper reset than Rev A: detach the source, flush the element,
+        // allow the browser media pipeline to settle, then rebuild and prime.
         audio.removeAttribute("src");
         audio.load();
         sourceAssigned = false;
+        await new Promise(resolve => setTimeout(resolve, CALIBRATION_REBUILD_SETTLE_MS));
 
         assignSourceIfNeeded();
         await ensureMetadata();
         await primeAudioElement();
+
+        audio.muted = false;
+        audio.volume = MAIN_VOLUME;
         return true;
       }catch(err){
+        audio.muted = false;
+        audio.volume = MAIN_VOLUME;
         return false;
       }
     }
@@ -727,58 +742,76 @@
     }
 
     async function runStartupCalibration(startTimeMs){
-      calibrationResultsMs = [];
-      calibrationStatus = "measuring…";
+      calibrationAttempts = [];
+      calibrationStatus = `ready · target < ${CALIBRATION_ACCEPT_MS} ms`;
       calibrationAccepted = false;
       updateDriftStats();
 
-      for(let attempt = 0; attempt <= CALIBRATION_MAX_REINITIALIZATIONS; attempt++){
+      const totalAttempts = CALIBRATION_MAX_REINITIALIZATIONS + 1;
+
+      for(let attemptIndex = 0; attemptIndex < totalAttempts; attemptIndex++){
+        const attemptNumber = attemptIndex + 1;
         const timeRemainingMs = startTimeMs - syncedNowMs();
+
         if(timeRemainingMs <= CALIBRATION_SAMPLE_MS + CALIBRATION_START_GUARD_MS){
-          calibrationStatus = calibrationResultsMs.length
-            ? `${formatCalibrationResults()} · stopped for start-time guard`
-            : "skipped — start too close";
+          calibrationStatus = calibrationAttempts.length
+            ? `${formatCalibrationAttempts()} · STOP: start-time guard`
+            : "SKIPPED: start too close";
           updateDriftStats();
           return false;
         }
 
-        setStatus(`Calibrating audio… ${attempt + 1}/${CALIBRATION_MAX_REINITIALIZATIONS + 1}`);
+        setStatus(`Calibrating audio… attempt ${attemptNumber}/${totalAttempts}`);
+        calibrationStatus = calibrationAttempts.length
+          ? `${formatCalibrationAttempts()} · measuring #${attemptNumber}…`
+          : `measuring #${attemptNumber}/${totalAttempts}…`;
+        updateDriftStats();
 
         let measuredMs;
         try{
           measuredMs = await runMutedCalibrationSample();
         }catch(err){
-          calibrationStatus = calibrationResultsMs.length
-            ? `${formatCalibrationResults()} · calibration stopped (${err.message})`
-            : `unavailable (${err.message})`;
+          calibrationStatus = calibrationAttempts.length
+            ? `${formatCalibrationAttempts()} · STOP: ${err.message}`
+            : `UNAVAILABLE: ${err.message}`;
           updateDriftStats();
           return false;
         }
 
-        calibrationResultsMs.push(measuredMs);
+        const acceptable = Math.abs(measuredMs) < CALIBRATION_ACCEPT_MS;
+        const isFinalAttempt = attemptNumber === totalAttempts;
+        const decision = acceptable ? "ACCEPT" : (isFinalAttempt ? "FINAL" : "REROLL");
 
-        if(Math.abs(measuredMs) < CALIBRATION_ACCEPT_MS){
+        calibrationAttempts.push({
+          attempt: attemptNumber,
+          measuredMs,
+          decision
+        });
+
+        if(acceptable){
           calibrationAccepted = true;
-          calibrationStatus = `${formatCalibrationResults()} · accepted`;
+          calibrationStatus = `${formatCalibrationAttempts()} · accepted below ${CALIBRATION_ACCEPT_MS} ms`;
           updateDriftStats();
           return true;
         }
 
-        calibrationStatus = `${formatCalibrationResults()} · rerolling…`;
+        if(isFinalAttempt){
+          calibrationStatus = `${formatCalibrationAttempts()} · final state accepted (no roll < ${CALIBRATION_ACCEPT_MS} ms)`;
+          updateDriftStats();
+          return false;
+        }
+
+        calibrationStatus = `${formatCalibrationAttempts()} · rebuilding pipeline…`;
         updateDriftStats();
 
-        if(attempt < CALIBRATION_MAX_REINITIALIZATIONS){
-          const rebuilt = await rebuildMainAudioPipeline();
-          if(!rebuilt){
-            calibrationStatus = `${formatCalibrationResults()} · rebuild unavailable`;
-            updateDriftStats();
-            return false;
-          }
+        const rebuilt = await rebuildMainAudioPipeline();
+        if(!rebuilt){
+          calibrationStatus = `${formatCalibrationAttempts()} · STOP: rebuild unavailable`;
+          updateDriftStats();
+          return false;
         }
       }
 
-      calibrationStatus = `${formatCalibrationResults()} · final state accepted`;
-      updateDriftStats();
       return false;
     }
 
