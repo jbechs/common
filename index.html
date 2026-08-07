@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.2 EXP · continuous preroll</div>
+      <div class="subtitle">v2</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -139,7 +139,6 @@
     <div id="countdown" class="countdown"></div>
     <div id="status" class="status">Ready.</div>
     <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
-    <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
     <div id="debug" class="debug"></div>
 
     <audio id="audio" preload="auto" playsinline class="hidden"></audio>
@@ -159,7 +158,6 @@
     const statusEl = document.getElementById("status");
     const countdownEl = document.getElementById("countdown");
     const transportEl = document.getElementById("transport");
-    const driftStatsEl = document.getElementById("driftStats");
     const debugEl = document.getElementById("debug");
 
     let countdownFrame = null;
@@ -170,8 +168,6 @@
     let crossfadeInterval = null;
 
     let scheduledAnchorMs = null;
-    let showStartMs = null;
-    let curtainTimer = null;
     let sourceAssigned = false;
     let preshowSourceAssigned = false;
     let preshowPlaying = false;
@@ -179,22 +175,6 @@
     let startAttempted = false;
     let lastDriftSec = 0;
     let lastHardSeekAtMs = 0;
-    let initialDriftSec = null;
-    let driftSampleCount = 0;
-    let driftAbsSumSec = 0;
-    let bestAbsDriftSec = null;
-    let worstAbsDriftSec = null;
-    let hardSeekCount = 0;
-    let lastSeekBeforeSec = null;
-    let lastSeekAfterSec = null;
-    let lastSuccessfulHardSeekAtMs = null;
-    let lastSeekAfter1Sec = null;
-    let lastSeekAfter3Sec = null;
-    let seekSettlingToken = 0;
-    let samplesUnder150 = 0;
-    let samplesUnder250 = 0;
-    let samplesUnderThreshold = 0;
-    let samplesAtOrAboveThreshold = 0;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
@@ -207,7 +187,6 @@
     const TRANSPORT_UPDATE_MS = 1000;
 
     const HARD_SEEK_THRESHOLD_SEC = 0.35;
-    const SILENT_PREROLL_SEC = 10;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
@@ -268,11 +247,6 @@
       if(readinessInterval){
         clearInterval(readinessInterval);
         readinessInterval = null;
-      }
-
-      if(curtainTimer){
-        clearTimeout(curtainTimer);
-        curtainTimer = null;
       }
     }
 
@@ -353,87 +327,6 @@
 
       transportEl.textContent =
         `${formatClockTime(current)} / ${formatClockTime(duration)} · drift ${driftMs} ms`;
-    }
-
-    function formatSignedMs(sec){
-      if(sec == null) return "—";
-      const ms = Math.round(sec * 1000);
-      return `${ms > 0 ? "+" : ""}${ms} ms`;
-    }
-
-    function formatElapsedSince(ms){
-      if(ms == null) return "—";
-      const totalSec = Math.max(0, Math.floor((highResNowMs() - ms) / 1000));
-      const m = Math.floor(totalSec / 60);
-      const s = totalSec % 60;
-      return m > 0 ? `${m}m ${s}s ago` : `${s}s ago`;
-    }
-
-    function recordDriftSample(driftSec){
-      if(!isFinite(driftSec)) return;
-
-      if(initialDriftSec == null){
-        initialDriftSec = driftSec;
-      }
-
-      const absDrift = Math.abs(driftSec);
-      driftSampleCount += 1;
-      driftAbsSumSec += absDrift;
-      bestAbsDriftSec = bestAbsDriftSec == null ? absDrift : Math.min(bestAbsDriftSec, absDrift);
-      worstAbsDriftSec = worstAbsDriftSec == null ? absDrift : Math.max(worstAbsDriftSec, absDrift);
-
-      if(absDrift < 0.15) samplesUnder150 += 1;
-      if(absDrift < 0.25) samplesUnder250 += 1;
-      if(absDrift < HARD_SEEK_THRESHOLD_SEC){
-        samplesUnderThreshold += 1;
-      }else{
-        samplesAtOrAboveThreshold += 1;
-      }
-    }
-
-    function updateDriftStats(){
-      const avgAbsSec = driftSampleCount > 0 ? driftAbsSumSec / driftSampleCount : null;
-      const improvementSec = initialDriftSec == null ? null : Math.abs(initialDriftSec) - Math.abs(lastDriftSec);
-      const improvementText = improvementSec == null ? "—" : `${Math.round(improvementSec * 1000)} ms`;
-      const pct = count => driftSampleCount > 0 ? `${Math.round((count / driftSampleCount) * 100)}%` : "—";
-
-      let lastSeekText = "—";
-      if(lastSeekBeforeSec != null && lastSeekAfterSec != null){
-        lastSeekText = `${formatSignedMs(lastSeekBeforeSec)} → ${formatSignedMs(lastSeekAfterSec)} · ${formatElapsedSince(lastSuccessfulHardSeekAtMs)}`;
-      }
-
-      let settlingText = "—";
-      if(lastSeekAfterSec != null){
-        settlingText = `immediate ${formatSignedMs(lastSeekAfterSec)} · 1s ${formatSignedMs(lastSeekAfter1Sec)} · 3s ${formatSignedMs(lastSeekAfter3Sec)}`;
-      }
-
-      driftStatsEl.innerHTML =
-        `Initial ${formatSignedMs(initialDriftSec)} · Avg ${avgAbsSec == null ? "—" : `${Math.round(avgAbsSec * 1000)} ms`} · ` +
-        `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
-        `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
-        `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
-        `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}<br>` +
-        `Post-seek settling: ${settlingText}`;
-    }
-
-    function resetDriftStats(){
-      initialDriftSec = null;
-      driftSampleCount = 0;
-      driftAbsSumSec = 0;
-      bestAbsDriftSec = null;
-      worstAbsDriftSec = null;
-      hardSeekCount = 0;
-      lastSeekBeforeSec = null;
-      lastSeekAfterSec = null;
-      lastSuccessfulHardSeekAtMs = null;
-      lastSeekAfter1Sec = null;
-      lastSeekAfter3Sec = null;
-      seekSettlingToken += 1;
-      samplesUnder150 = 0;
-      samplesUnder250 = 0;
-      samplesUnderThreshold = 0;
-      samplesAtOrAboveThreshold = 0;
-      updateDriftStats();
     }
 
     async function syncServerClock(samples = 5){
@@ -801,11 +694,11 @@
       return expected - audio.currentTime;
     }
 
-    async function hardSyncToExpectedTime(reason, preSeekDriftSec){
+    async function hardSyncToExpectedTime(reason){
       const expected = getExpectedTrackTimeSec();
 
-      if(expected == null) return false;
-      if(!isFinite(audio.duration) || expected >= audio.duration) return false;
+      if(expected == null) return;
+      if(!isFinite(audio.duration) || expected >= audio.duration) return;
 
       const bufferedEnd = getBufferedEndFor(expected);
 
@@ -814,59 +707,26 @@
         await waitForSeek();
 
         lastDriftSec = getCurrentDriftSec();
-        hardSeekCount += 1;
-        lastSeekBeforeSec = preSeekDriftSec;
-        lastSeekAfterSec = lastDriftSec;
-        lastSuccessfulHardSeekAtMs = highResNowMs();
-        lastSeekAfter1Sec = null;
-        lastSeekAfter3Sec = null;
-        const thisSeekToken = ++seekSettlingToken;
-
-        setTimeout(()=>{
-          if(thisSeekToken !== seekSettlingToken || audio.paused || audio.ended) return;
-          lastSeekAfter1Sec = getCurrentDriftSec();
-          updateDriftStats();
-        }, 1000);
-
-        setTimeout(()=>{
-          if(thisSeekToken !== seekSettlingToken || audio.paused || audio.ended) return;
-          lastSeekAfter3Sec = getCurrentDriftSec();
-          updateDriftStats();
-        }, 3000);
-
         setStatus(reason);
         updateTransport();
-        updateDriftStats();
-        return true;
       }else{
         setStatus("Sync delayed — buffering");
         setDebug(`Need audio near ${formatClockTime(expected)} before correcting.`);
-        return false;
       }
     }
 
     function checkDriftStabilityFirst(){
       if(audio.paused || audio.ended || scheduledAnchorMs == null) return;
-      if(showStartMs != null && syncedNowMs() < showStartMs){
-        lastDriftSec = getCurrentDriftSec();
-        updateTransport();
-        return;
-      }
 
       const driftSec = getCurrentDriftSec();
       lastDriftSec = driftSec;
-      recordDriftSample(driftSec);
-      updateDriftStats();
 
       const nowMs = highResNowMs();
       const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
 
       if(Math.abs(driftSec) >= HARD_SEEK_THRESHOLD_SEC && cooldownElapsed){
         lastHardSeekAtMs = nowMs;
-        hardSyncToExpectedTime(
-          `Seek correction (${Math.round(driftSec * 1000)} ms)`,
-          driftSec
-        );
+        hardSyncToExpectedTime(`Seek correction (${Math.round(driftSec * 1000)} ms)`);
       }else{
         setStatus("Playing");
         updateTransport();
@@ -878,43 +738,6 @@
 
       driftInterval = setInterval(checkDriftStabilityFirst, DRIFT_CHECK_MS);
       transportInterval = setInterval(updateTransport, TRANSPORT_UPDATE_MS);
-    }
-
-    function scheduleCurtainTransition(){
-      if(showStartMs == null) return;
-
-      if(curtainTimer){
-        clearTimeout(curtainTimer);
-        curtainTimer = null;
-      }
-
-      const remainingMs = showStartMs - syncedNowMs();
-
-      if(remainingMs <= 0){
-        crossfadeFromPreshowToMain();
-        setCountdown("");
-        setStatus("Playing");
-        return;
-      }
-
-      setStatus("Silent preroll…");
-
-      const tick = ()=>{
-        const remaining = showStartMs - syncedNowMs();
-        if(remaining > 0){
-          setCountdown(`Show starts in ${formatCountdown(remaining)}`);
-          requestAnimationFrame(tick);
-        }
-      };
-      tick();
-
-      curtainTimer = setTimeout(()=>{
-        curtainTimer = null;
-        crossfadeFromPreshowToMain();
-        setCountdown("");
-        setStatus("Playing");
-        setDebug(`${lastClockSyncDebug} · Continuous preroll completed; no curtain seek.`);
-      }, Math.max(0, remainingMs));
     }
 
     async function startPlaybackAtCurrentCorrectOffset(){
@@ -971,10 +794,7 @@
 
       showPlayer();
 
-      const beforeCurtain = showStartMs != null && syncedNowMs() < showStartMs;
-      if(beforeCurtain){
-        audio.volume = 0;
-      }else if(preshowPlaying && !preshowAudio.paused){
+      if(preshowPlaying && !preshowAudio.paused){
         audio.volume = 0;
       }else{
         audio.volume = MAIN_VOLUME;
@@ -984,25 +804,16 @@
 
       await audio.play();
 
-      if(beforeCurtain){
-        scheduleCurtainTransition();
-      }else{
-        crossfadeFromPreshowToMain();
-      }
+      crossfadeFromPreshowToMain();
 
       lockBeginButton();
       waitingForManualStart = false;
       startAttempted = true;
 
       hideStartNow();
-      if(showStartMs != null && syncedNowMs() < showStartMs){
-        setStatus("Silent preroll…");
-        setDebug(`${lastClockSyncDebug} · Main track running continuously through 10s silent head.`);
-      }else{
-        setCountdown("");
-        setStatus("Playing");
-        setDebug(lastClockSyncDebug || "");
-      }
+      setCountdown("");
+      setStatus("Playing");
+      setDebug(lastClockSyncDebug || "");
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1086,10 +897,8 @@
       hideStartNow();
       waitingForManualStart = false;
       startAttempted = false;
-      showStartMs = null;
       lastDriftSec = 0;
       lastHardSeekAtMs = 0;
-      resetDriftStats();
       audio.volume = MAIN_VOLUME;
 
       setDebug("");
@@ -1121,30 +930,21 @@
         await primeAudioElement();
 
         const startTimeMs = new Date(startInput.value).getTime();
-        showStartMs = startTimeMs;
-        const prerollStartMs = startTimeMs - (SILENT_PREROLL_SEC * 1000);
-        const offsetSec = (syncedNowMs() - prerollStartMs) / 1000;
+        const offsetSec = (syncedNowMs() - startTimeMs) / 1000;
 
-        scheduledAnchorMs = prerollStartMs;
+        scheduledAnchorMs = startTimeMs;
 
         if(offsetSec < 0){
           await startPreshowLoop();
-          beginCountdown(prerollStartMs);
+          beginCountdown(startTimeMs);
           setStatus(preshowPlaying ? "Pre-show playing…" : "Downloading…");
-          setDebug(`${lastClockSyncDebug} · Main track will begin muted 10s before show time.`);
         }else{
-          if(syncedNowMs() < showStartMs){
-            await startPreshowLoop();
-            setCountdown(`Show starts in ${formatCountdown(showStartMs - syncedNowMs())}`);
-            setStatus("Ready — tap Begin for silent preroll");
-          }else{
-            stopPreshowImmediately();
-            setCountdown("");
-            setStatus("Tap Begin to join");
-          }
+          stopPreshowImmediately();
+          setCountdown("");
+          setStatus("Tap Begin to join");
           waitingForManualStart = true;
           showStartNow();
-          setDebug(`${lastClockSyncDebug} · Preroll start is already in the past; Begin will jump to the correct continuous-track offset.`);
+          setDebug(`${lastClockSyncDebug} · Start time is already in the past; Begin will jump to the correct offset.`);
         }
       }catch(err){
         stopPreshowImmediately();
@@ -1272,7 +1072,6 @@
     });
 
     updateTransport();
-    updateDriftStats();
   </script>
 </body>
 </html>
