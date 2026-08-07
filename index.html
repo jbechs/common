@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.2 EXP · continuous preroll 15s</div>
+      <div class="subtitle">v3.2</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -170,8 +170,6 @@
     let crossfadeInterval = null;
 
     let scheduledAnchorMs = null;
-    let showStartMs = null;
-    let curtainTimer = null;
     let sourceAssigned = false;
     let preshowSourceAssigned = false;
     let preshowPlaying = false;
@@ -206,8 +204,10 @@
     const DRIFT_CHECK_MS = 1000;
     const TRANSPORT_UPDATE_MS = 1000;
 
+    // Production philosophy (Aug 2026): minimum intervention.
+    // Preserve continuous playback whenever possible; correct only when
+    // reported drift exceeds the tested 350 ms guardrail.
     const HARD_SEEK_THRESHOLD_SEC = 0.35;
-    const SILENT_PREROLL_SEC = 15;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
@@ -268,11 +268,6 @@
       if(readinessInterval){
         clearInterval(readinessInterval);
         readinessInterval = null;
-      }
-
-      if(curtainTimer){
-        clearTimeout(curtainTimer);
-        curtainTimer = null;
       }
     }
 
@@ -847,11 +842,6 @@
 
     function checkDriftStabilityFirst(){
       if(audio.paused || audio.ended || scheduledAnchorMs == null) return;
-      if(showStartMs != null && syncedNowMs() < showStartMs){
-        lastDriftSec = getCurrentDriftSec();
-        updateTransport();
-        return;
-      }
 
       const driftSec = getCurrentDriftSec();
       lastDriftSec = driftSec;
@@ -878,43 +868,6 @@
 
       driftInterval = setInterval(checkDriftStabilityFirst, DRIFT_CHECK_MS);
       transportInterval = setInterval(updateTransport, TRANSPORT_UPDATE_MS);
-    }
-
-    function scheduleCurtainTransition(){
-      if(showStartMs == null) return;
-
-      if(curtainTimer){
-        clearTimeout(curtainTimer);
-        curtainTimer = null;
-      }
-
-      const remainingMs = showStartMs - syncedNowMs();
-
-      if(remainingMs <= 0){
-        crossfadeFromPreshowToMain();
-        setCountdown("");
-        setStatus("Playing");
-        return;
-      }
-
-      setStatus("Silent preroll…");
-
-      const tick = ()=>{
-        const remaining = showStartMs - syncedNowMs();
-        if(remaining > 0){
-          setCountdown(`Show starts in ${formatCountdown(remaining)}`);
-          requestAnimationFrame(tick);
-        }
-      };
-      tick();
-
-      curtainTimer = setTimeout(()=>{
-        curtainTimer = null;
-        crossfadeFromPreshowToMain();
-        setCountdown("");
-        setStatus("Playing");
-        setDebug(`${lastClockSyncDebug} · Continuous preroll completed; no curtain seek.`);
-      }, Math.max(0, remainingMs));
     }
 
     async function startPlaybackAtCurrentCorrectOffset(){
@@ -971,10 +924,7 @@
 
       showPlayer();
 
-      const beforeCurtain = showStartMs != null && syncedNowMs() < showStartMs;
-      if(beforeCurtain){
-        audio.volume = 0;
-      }else if(preshowPlaying && !preshowAudio.paused){
+      if(preshowPlaying && !preshowAudio.paused){
         audio.volume = 0;
       }else{
         audio.volume = MAIN_VOLUME;
@@ -984,25 +934,16 @@
 
       await audio.play();
 
-      if(beforeCurtain){
-        scheduleCurtainTransition();
-      }else{
-        crossfadeFromPreshowToMain();
-      }
+      crossfadeFromPreshowToMain();
 
       lockBeginButton();
       waitingForManualStart = false;
       startAttempted = true;
 
       hideStartNow();
-      if(showStartMs != null && syncedNowMs() < showStartMs){
-        setStatus("Silent preroll…");
-        setDebug(`${lastClockSyncDebug} · Main track running continuously through 15s silent head.`);
-      }else{
-        setCountdown("");
-        setStatus("Playing");
-        setDebug(lastClockSyncDebug || "");
-      }
+      setCountdown("");
+      setStatus("Playing");
+      setDebug(lastClockSyncDebug || "");
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1086,7 +1027,6 @@
       hideStartNow();
       waitingForManualStart = false;
       startAttempted = false;
-      showStartMs = null;
       lastDriftSec = 0;
       lastHardSeekAtMs = 0;
       resetDriftStats();
@@ -1121,30 +1061,21 @@
         await primeAudioElement();
 
         const startTimeMs = new Date(startInput.value).getTime();
-        showStartMs = startTimeMs;
-        const prerollStartMs = startTimeMs - (SILENT_PREROLL_SEC * 1000);
-        const offsetSec = (syncedNowMs() - prerollStartMs) / 1000;
+        const offsetSec = (syncedNowMs() - startTimeMs) / 1000;
 
-        scheduledAnchorMs = prerollStartMs;
+        scheduledAnchorMs = startTimeMs;
 
         if(offsetSec < 0){
           await startPreshowLoop();
-          beginCountdown(prerollStartMs);
+          beginCountdown(startTimeMs);
           setStatus(preshowPlaying ? "Pre-show playing…" : "Downloading…");
-          setDebug(`${lastClockSyncDebug} · Main track will begin muted 15s before show time.`);
         }else{
-          if(syncedNowMs() < showStartMs){
-            await startPreshowLoop();
-            setCountdown(`Show starts in ${formatCountdown(showStartMs - syncedNowMs())}`);
-            setStatus("Ready — tap Begin for silent preroll");
-          }else{
-            stopPreshowImmediately();
-            setCountdown("");
-            setStatus("Tap Begin to join");
-          }
+          stopPreshowImmediately();
+          setCountdown("");
+          setStatus("Tap Begin to join");
           waitingForManualStart = true;
           showStartNow();
-          setDebug(`${lastClockSyncDebug} · Preroll start is already in the past; Begin will jump to the correct continuous-track offset.`);
+          setDebug(`${lastClockSyncDebug} · Start time is already in the past; Begin will jump to the correct offset.`);
         }
       }catch(err){
         stopPreshowImmediately();
