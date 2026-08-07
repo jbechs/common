@@ -174,6 +174,7 @@
     let waitingForManualStart = false;
     let startAttempted = false;
     let lastDriftSec = 0;
+    let lastHardSeekAtMs = 0;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
@@ -185,7 +186,8 @@
     const DRIFT_CHECK_MS = 1000;
     const TRANSPORT_UPDATE_MS = 1000;
 
-    const HARD_SEEK_THRESHOLD_SEC = 0.50;
+    const HARD_SEEK_THRESHOLD_SEC = 0.35;
+    const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
 
     const PRESHOW_VOLUME = 1.0;
@@ -719,7 +721,11 @@
       const driftSec = getCurrentDriftSec();
       lastDriftSec = driftSec;
 
-      if(Math.abs(driftSec) >= HARD_SEEK_THRESHOLD_SEC){
+      const nowMs = highResNowMs();
+      const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
+
+      if(Math.abs(driftSec) >= HARD_SEEK_THRESHOLD_SEC && cooldownElapsed){
+        lastHardSeekAtMs = nowMs;
         hardSyncToExpectedTime(`Seek correction (${Math.round(driftSec * 1000)} ms)`);
       }else{
         setStatus("Playing");
@@ -892,6 +898,7 @@
       waitingForManualStart = false;
       startAttempted = false;
       lastDriftSec = 0;
+      lastHardSeekAtMs = 0;
       audio.volume = MAIN_VOLUME;
 
       setDebug("");
@@ -1068,3 +1075,4 @@
   </script>
 </body>
 </html>
+
