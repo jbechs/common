@@ -199,9 +199,7 @@
     let performanceClockFrozen = false;
     let frozenSyncedEpochMs = null;
     let frozenPerformanceNowMs = null;
-    let localMainAudioUrl = null;
-    let mainAudioFullyLocal = false;
-    let mainAudioBytes = null;
+    let networkWasOnlineAtCurtain = null;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -211,7 +209,8 @@
     const DRIFT_CHECK_MS = 1000;
     const TRANSPORT_UPDATE_MS = 1000;
 
-    // Production philosophy (Aug 2026): minimum intervention.
+    // Production philosophy (Aug 2026): minimum intervention + network indifference.
+    // Normal media URL remains intact; the browser is allowed to warm its own media cache/buffer.
     // 350 ms remains the preferred operating band for diagnostics.
     // A hard seek now requires a sustained poor state: >=400 ms for
     // three consecutive 1-second checks, plus the existing cooldown.
@@ -244,12 +243,14 @@
       frozenSyncedEpochMs = highResNowMs() + serverClockOffsetMs;
       frozenPerformanceNowMs = performance.now();
       performanceClockFrozen = true;
+      networkWasOnlineAtCurtain = navigator.onLine;
     }
 
     function unfreezePerformanceClock(){
       performanceClockFrozen = false;
       frozenSyncedEpochMs = null;
       frozenPerformanceNowMs = null;
+      networkWasOnlineAtCurtain = null;
     }
 
     function setStatus(msg){
@@ -325,43 +326,9 @@
     function assignSourceIfNeeded(){
       if(sourceAssigned) return;
 
-      audio.src = localMainAudioUrl || AUDIO_URL;
+      audio.src = AUDIO_URL;
       audio.preload = "auto";
       sourceAssigned = true;
-    }
-
-    async function preloadMainAudioFully(){
-      if(mainAudioFullyLocal && localMainAudioUrl) return true;
-
-      setStatus("Downloading show audio…");
-      setDebug(`${lastClockSyncDebug} · Loading full main track locally before curtain.`);
-
-      const response = await fetch(AUDIO_URL, { cache: "force-cache" });
-      if(!response.ok){
-        throw new Error(`Main audio download failed: HTTP ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      if(!blob || blob.size <= 0){
-        throw new Error("Main audio download returned an empty file");
-      }
-
-      if(localMainAudioUrl){
-        URL.revokeObjectURL(localMainAudioUrl);
-      }
-
-      localMainAudioUrl = URL.createObjectURL(blob);
-      mainAudioBytes = blob.size;
-      mainAudioFullyLocal = true;
-
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
-      sourceAssigned = false;
-      assignSourceIfNeeded();
-      audio.load();
-
-      return true;
     }
 
     function assignPreshowSourceIfNeeded(){
@@ -470,7 +437,7 @@
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
         `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥400 ms) · Hard seeks ${hardSeekCount}<br>` +
-        `Performance lock ${performanceClockFrozen ? "ON" : "off"} · Main audio ${mainAudioFullyLocal ? "LOCAL" : "network"}<br>` +
+        `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
@@ -721,8 +688,10 @@
     }
 
     function startDownload(){
-      // The preshow may use the network during preparation. The main show audio
-      // is fetched in full by preloadMainAudioFully() before playback is allowed.
+      assignSourceIfNeeded();
+      audio.preload = "auto";
+      audio.load();
+
       assignPreshowSourceIfNeeded();
       preshowAudio.preload = "auto";
       preshowAudio.load();
@@ -814,6 +783,32 @@
       }catch(err){
         return 0;
       }
+    }
+
+    function getBufferedCoverage(){
+      try{
+        if(!isFinite(audio.duration) || audio.duration <= 0 || audio.buffered.length === 0){
+          return { seconds: 0, percent: 0, full: false };
+        }
+
+        let total = 0;
+        for(let i = 0; i < audio.buffered.length; i++){
+          total += Math.max(0, audio.buffered.end(i) - audio.buffered.start(i));
+        }
+
+        const percent = Math.max(0, Math.min(100, (total / audio.duration) * 100));
+        const full = percent >= 99 || (audio.buffered.length === 1 && audio.buffered.start(0) <= 0.25 && audio.buffered.end(0) >= audio.duration - 0.5);
+        return { seconds: total, percent, full };
+      }catch(err){
+        return { seconds: 0, percent: 0, full: false };
+      }
+    }
+
+    function getNetworkResilienceText(){
+      const coverage = getBufferedCoverage();
+      const bufferText = coverage.full ? "Main audio fully buffered" : `Main audio buffer ${Math.round(coverage.percent)}%`;
+      const lockText = performanceClockFrozen ? "Clock frozen" : "Clock live";
+      return `${lockText} · ${bufferText}`;
     }
 
     function hasBufferedThrough(targetTimeSec){
@@ -950,8 +945,9 @@
 
       await ensureMetadata();
 
-      // Curtain lock: from this point forward the show clock uses the last
-      // synchronized epoch plus performance.now(). No network resync is needed.
+      // Performance lock: from this point forward the synchronized show clock
+      // is derived from the last good server offset plus performance.now().
+      // Network changes cannot alter the show timeline.
       freezePerformanceClock();
 
       let offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
@@ -1020,8 +1016,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      const localMb = mainAudioBytes ? (mainAudioBytes / (1024 * 1024)).toFixed(1) : "?";
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · Clock frozen · Main audio local (${localMb} MB)`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1063,10 +1058,11 @@
         const bufferedEnd = getBufferedEndFor(offsetSec);
         const bufferedAhead = Math.max(0, bufferedEnd - offsetSec);
 
+        const coverage = getBufferedCoverage();
         if(hasEnoughToStartAt(offsetSec)){
-          setDebug(`${lastClockSyncDebug} · Audio ready. Buffer ahead: ${bufferedAhead.toFixed(1)}s.`);
+          setDebug(`${lastClockSyncDebug} · Audio ready. Buffer ahead ${bufferedAhead.toFixed(1)}s · total buffered ${Math.round(coverage.percent)}%.`);
         }else{
-          setDebug(`${lastClockSyncDebug} · Preloading audio. Buffer ahead: ${bufferedAhead.toFixed(1)}s.`);
+          setDebug(`${lastClockSyncDebug} · Preloading audio. Buffer ahead ${bufferedAhead.toFixed(1)}s · total buffered ${Math.round(coverage.percent)}%.`);
         }
       }, READINESS_CHECK_MS);
 
@@ -1132,7 +1128,8 @@
 
         await syncServerClock();
 
-        await preloadMainAudioFully();
+        setStatus("Downloading…");
+
         await ensureMetadata();
         updateTransport();
 
@@ -1189,12 +1186,6 @@
       }
     }
 
-    window.addEventListener("beforeunload", ()=>{
-      if(localMainAudioUrl){
-        URL.revokeObjectURL(localMainAudioUrl);
-      }
-    });
-
     playButton.addEventListener("click", handlePrepare);
     startNowButton.addEventListener("click", handleManualStart);
 
@@ -1219,10 +1210,12 @@
         if(offsetSec >= 1){
           setDebug(`${lastClockSyncDebug} · Ready to seek/join at ${formatClockTime(offsetSec)}.`);
         }else if(hasEnoughToStartAt(offsetSec)){
+          const coverage = getBufferedCoverage();
           setStatus("Ready — tap Begin");
-          setDebug(`${lastClockSyncDebug} · Audio ready. Buffer ahead: ${bufferedAhead.toFixed(1)}s.`);
+          setDebug(`${lastClockSyncDebug} · Audio ready. Buffer ahead ${bufferedAhead.toFixed(1)}s · total buffered ${Math.round(coverage.percent)}%.`);
         }else{
-          setDebug(`${lastClockSyncDebug} · Buffering. Buffer ahead: ${bufferedAhead.toFixed(1)}s.`);
+          const coverage = getBufferedCoverage();
+          setDebug(`${lastClockSyncDebug} · Buffering. Buffer ahead ${bufferedAhead.toFixed(1)}s · total buffered ${Math.round(coverage.percent)}%.`);
         }
       }
     });
@@ -1261,6 +1254,7 @@
       clearPlaybackMonitors();
       clearCrossfade();
       resetPlaybackRate();
+      unfreezePerformanceClock();
       stopPreshowImmediately();
 
       waitingForManualStart = false;
@@ -1286,8 +1280,24 @@
       setDebug(`${lastClockSyncDebug} · Pre-show audio failed to load.`);
     });
 
+    function noteNetworkChange(){
+      updateDriftStats();
+
+      // During the performance, connectivity changes are deliberately ignored.
+      // Playback continues from the browser's ordinary media buffer/cache and
+      // the frozen monotonic show clock. No reload, resync, or seek is triggered.
+      if(performanceClockFrozen && !audio.paused && !audio.ended){
+        setDebug(`${lastClockSyncDebug || "Clock prepared"} · ${getNetworkResilienceText()} · Network changed to ${navigator.onLine ? "online" : "offline"}; playback untouched.`);
+      }
+    }
+
+    window.addEventListener("online", noteNetworkChange);
+    window.addEventListener("offline", noteNetworkChange);
+
     updateTransport();
     updateDriftStats();
   </script>
 </body>
 </html>
+
+
