@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.1 EXP-B · startup calibration</div>
+      <div class="subtitle">v3.2 EXP · continuous preroll</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -170,6 +170,8 @@
     let crossfadeInterval = null;
 
     let scheduledAnchorMs = null;
+    let showStartMs = null;
+    let curtainTimer = null;
     let sourceAssigned = false;
     let preshowSourceAssigned = false;
     let preshowPlaying = false;
@@ -196,10 +198,6 @@
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
 
-    let calibrationAttempts = [];
-    let calibrationStatus = "not run";
-    let calibrationAccepted = false;
-
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
     const SEEK_PLAYABLE_TIMEOUT_MS = 12000;
@@ -209,18 +207,9 @@
     const TRANSPORT_UPDATE_MS = 1000;
 
     const HARD_SEEK_THRESHOLD_SEC = 0.35;
+    const SILENT_PREROLL_SEC = 10;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const NORMAL_RATE = 1.0;
-
-    // Experimental pre-show startup calibration.
-    // The main track is run muted against a temporary wall-clock anchor.
-    // If the measured operating point is poor, the media pipeline is rebuilt
-    // at most twice before the show. In-show behavior remains identical to v3.1.
-    const CALIBRATION_ACCEPT_MS = 350;
-    const CALIBRATION_SAMPLE_MS = 4000;
-    const CALIBRATION_MAX_REINITIALIZATIONS = 2;
-    const CALIBRATION_START_GUARD_MS = 8000;
-    const CALIBRATION_REBUILD_SETTLE_MS = 350;
 
     const PRESHOW_VOLUME = 1.0;
     const MAIN_VOLUME = 1.0;
@@ -279,6 +268,11 @@
       if(readinessInterval){
         clearInterval(readinessInterval);
         readinessInterval = null;
+      }
+
+      if(curtainTimer){
+        clearTimeout(curtainTimer);
+        curtainTimer = null;
       }
     }
 
@@ -419,8 +413,7 @@
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
         `Improvement ${improvementText} · Hard seeks ${hardSeekCount} · Last ${lastSeekText}<br>` +
-        `Post-seek settling: ${settlingText}<br>` +
-        `Startup calibration: ${calibrationStatus}`;
+        `Post-seek settling: ${settlingText}`;
     }
 
     function resetDriftStats(){
@@ -440,9 +433,6 @@
       samplesUnder250 = 0;
       samplesUnderThreshold = 0;
       samplesAtOrAboveThreshold = 0;
-      calibrationAttempts = [];
-      calibrationStatus = "not run";
-      calibrationAccepted = false;
       updateDriftStats();
     }
 
@@ -670,151 +660,6 @@
       }
     }
 
-    function formatCalibrationAttempts(){
-      if(calibrationAttempts.length === 0) return "not run";
-      return calibrationAttempts
-        .map(item => {
-          const signed = `${item.measuredMs >= 0 ? "+" : ""}${item.measuredMs} ms`;
-          return `#${item.attempt} ${signed} → ${item.decision}`;
-        })
-        .join(" · ");
-    }
-
-    async function rebuildMainAudioPipeline(){
-      try{
-        audio.pause();
-        audio.muted = true;
-        audio.volume = 0;
-
-        // Deeper reset than Rev A: detach the source, flush the element,
-        // allow the browser media pipeline to settle, then rebuild and prime.
-        audio.removeAttribute("src");
-        audio.load();
-        sourceAssigned = false;
-        await new Promise(resolve => setTimeout(resolve, CALIBRATION_REBUILD_SETTLE_MS));
-
-        assignSourceIfNeeded();
-        await ensureMetadata();
-        await primeAudioElement();
-
-        audio.muted = false;
-        audio.volume = MAIN_VOLUME;
-        return true;
-      }catch(err){
-        audio.muted = false;
-        audio.volume = MAIN_VOLUME;
-        return false;
-      }
-    }
-
-    async function runMutedCalibrationSample(){
-      await ensureMetadata();
-
-      audio.pause();
-      resetPlaybackRate();
-      audio.volume = 0;
-      audio.muted = true;
-
-      try{
-        audio.currentTime = 0;
-        await waitForSeek();
-
-        const wallStartMs = syncedNowMs();
-        const mediaStartSec = audio.currentTime || 0;
-
-        await audio.play();
-        await new Promise(resolve => setTimeout(resolve, CALIBRATION_SAMPLE_MS));
-
-        const wallElapsedSec = (syncedNowMs() - wallStartMs) / 1000;
-        const mediaElapsedSec = (audio.currentTime || 0) - mediaStartSec;
-        const measuredDriftMs = Math.round((wallElapsedSec - mediaElapsedSec) * 1000);
-
-        audio.pause();
-        audio.currentTime = 0;
-        await waitForSeek();
-
-        return measuredDriftMs;
-      }finally{
-        audio.pause();
-        audio.muted = false;
-        audio.volume = MAIN_VOLUME;
-      }
-    }
-
-    async function runStartupCalibration(startTimeMs){
-      calibrationAttempts = [];
-      calibrationStatus = `ready · target < ${CALIBRATION_ACCEPT_MS} ms`;
-      calibrationAccepted = false;
-      updateDriftStats();
-
-      const totalAttempts = CALIBRATION_MAX_REINITIALIZATIONS + 1;
-
-      for(let attemptIndex = 0; attemptIndex < totalAttempts; attemptIndex++){
-        const attemptNumber = attemptIndex + 1;
-        const timeRemainingMs = startTimeMs - syncedNowMs();
-
-        if(timeRemainingMs <= CALIBRATION_SAMPLE_MS + CALIBRATION_START_GUARD_MS){
-          calibrationStatus = calibrationAttempts.length
-            ? `${formatCalibrationAttempts()} · STOP: start-time guard`
-            : "SKIPPED: start too close";
-          updateDriftStats();
-          return false;
-        }
-
-        setStatus(`Calibrating audio… attempt ${attemptNumber}/${totalAttempts}`);
-        calibrationStatus = calibrationAttempts.length
-          ? `${formatCalibrationAttempts()} · measuring #${attemptNumber}…`
-          : `measuring #${attemptNumber}/${totalAttempts}…`;
-        updateDriftStats();
-
-        let measuredMs;
-        try{
-          measuredMs = await runMutedCalibrationSample();
-        }catch(err){
-          calibrationStatus = calibrationAttempts.length
-            ? `${formatCalibrationAttempts()} · STOP: ${err.message}`
-            : `UNAVAILABLE: ${err.message}`;
-          updateDriftStats();
-          return false;
-        }
-
-        const acceptable = Math.abs(measuredMs) < CALIBRATION_ACCEPT_MS;
-        const isFinalAttempt = attemptNumber === totalAttempts;
-        const decision = acceptable ? "ACCEPT" : (isFinalAttempt ? "FINAL" : "REROLL");
-
-        calibrationAttempts.push({
-          attempt: attemptNumber,
-          measuredMs,
-          decision
-        });
-
-        if(acceptable){
-          calibrationAccepted = true;
-          calibrationStatus = `${formatCalibrationAttempts()} · accepted below ${CALIBRATION_ACCEPT_MS} ms`;
-          updateDriftStats();
-          return true;
-        }
-
-        if(isFinalAttempt){
-          calibrationStatus = `${formatCalibrationAttempts()} · final state accepted (no roll < ${CALIBRATION_ACCEPT_MS} ms)`;
-          updateDriftStats();
-          return false;
-        }
-
-        calibrationStatus = `${formatCalibrationAttempts()} · rebuilding pipeline…`;
-        updateDriftStats();
-
-        const rebuilt = await rebuildMainAudioPipeline();
-        if(!rebuilt){
-          calibrationStatus = `${formatCalibrationAttempts()} · STOP: rebuild unavailable`;
-          updateDriftStats();
-          return false;
-        }
-      }
-
-      return false;
-    }
-
     function startDownload(){
       assignSourceIfNeeded();
       audio.preload = "auto";
@@ -1002,6 +847,11 @@
 
     function checkDriftStabilityFirst(){
       if(audio.paused || audio.ended || scheduledAnchorMs == null) return;
+      if(showStartMs != null && syncedNowMs() < showStartMs){
+        lastDriftSec = getCurrentDriftSec();
+        updateTransport();
+        return;
+      }
 
       const driftSec = getCurrentDriftSec();
       lastDriftSec = driftSec;
@@ -1028,6 +878,43 @@
 
       driftInterval = setInterval(checkDriftStabilityFirst, DRIFT_CHECK_MS);
       transportInterval = setInterval(updateTransport, TRANSPORT_UPDATE_MS);
+    }
+
+    function scheduleCurtainTransition(){
+      if(showStartMs == null) return;
+
+      if(curtainTimer){
+        clearTimeout(curtainTimer);
+        curtainTimer = null;
+      }
+
+      const remainingMs = showStartMs - syncedNowMs();
+
+      if(remainingMs <= 0){
+        crossfadeFromPreshowToMain();
+        setCountdown("");
+        setStatus("Playing");
+        return;
+      }
+
+      setStatus("Silent preroll…");
+
+      const tick = ()=>{
+        const remaining = showStartMs - syncedNowMs();
+        if(remaining > 0){
+          setCountdown(`Show starts in ${formatCountdown(remaining)}`);
+          requestAnimationFrame(tick);
+        }
+      };
+      tick();
+
+      curtainTimer = setTimeout(()=>{
+        curtainTimer = null;
+        crossfadeFromPreshowToMain();
+        setCountdown("");
+        setStatus("Playing");
+        setDebug(`${lastClockSyncDebug} · Continuous preroll completed; no curtain seek.`);
+      }, Math.max(0, remainingMs));
     }
 
     async function startPlaybackAtCurrentCorrectOffset(){
@@ -1084,7 +971,10 @@
 
       showPlayer();
 
-      if(preshowPlaying && !preshowAudio.paused){
+      const beforeCurtain = showStartMs != null && syncedNowMs() < showStartMs;
+      if(beforeCurtain){
+        audio.volume = 0;
+      }else if(preshowPlaying && !preshowAudio.paused){
         audio.volume = 0;
       }else{
         audio.volume = MAIN_VOLUME;
@@ -1094,16 +984,25 @@
 
       await audio.play();
 
-      crossfadeFromPreshowToMain();
+      if(beforeCurtain){
+        scheduleCurtainTransition();
+      }else{
+        crossfadeFromPreshowToMain();
+      }
 
       lockBeginButton();
       waitingForManualStart = false;
       startAttempted = true;
 
       hideStartNow();
-      setCountdown("");
-      setStatus("Playing");
-      setDebug(lastClockSyncDebug || "");
+      if(showStartMs != null && syncedNowMs() < showStartMs){
+        setStatus("Silent preroll…");
+        setDebug(`${lastClockSyncDebug} · Main track running continuously through 10s silent head.`);
+      }else{
+        setCountdown("");
+        setStatus("Playing");
+        setDebug(lastClockSyncDebug || "");
+      }
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1187,6 +1086,7 @@
       hideStartNow();
       waitingForManualStart = false;
       startAttempted = false;
+      showStartMs = null;
       lastDriftSec = 0;
       lastHardSeekAtMs = 0;
       resetDriftStats();
@@ -1221,26 +1121,30 @@
         await primeAudioElement();
 
         const startTimeMs = new Date(startInput.value).getTime();
-        const offsetSec = (syncedNowMs() - startTimeMs) / 1000;
+        showStartMs = startTimeMs;
+        const prerollStartMs = startTimeMs - (SILENT_PREROLL_SEC * 1000);
+        const offsetSec = (syncedNowMs() - prerollStartMs) / 1000;
 
-        scheduledAnchorMs = startTimeMs;
+        scheduledAnchorMs = prerollStartMs;
 
         if(offsetSec < 0){
           await startPreshowLoop();
-
-          // Experimental: while the audible preshow continues, silently sample
-          // the main audio pipeline and allow up to two bounded reinitializations.
-          await runStartupCalibration(startTimeMs);
-
-          beginCountdown(startTimeMs);
+          beginCountdown(prerollStartMs);
           setStatus(preshowPlaying ? "Pre-show playing…" : "Downloading…");
+          setDebug(`${lastClockSyncDebug} · Main track will begin muted 10s before show time.`);
         }else{
-          stopPreshowImmediately();
-          setCountdown("");
-          setStatus("Tap Begin to join");
+          if(syncedNowMs() < showStartMs){
+            await startPreshowLoop();
+            setCountdown(`Show starts in ${formatCountdown(showStartMs - syncedNowMs())}`);
+            setStatus("Ready — tap Begin for silent preroll");
+          }else{
+            stopPreshowImmediately();
+            setCountdown("");
+            setStatus("Tap Begin to join");
+          }
           waitingForManualStart = true;
           showStartNow();
-          setDebug(`${lastClockSyncDebug} · Start time is already in the past; Begin will jump to the correct offset.`);
+          setDebug(`${lastClockSyncDebug} · Preroll start is already in the past; Begin will jump to the correct continuous-track offset.`);
         }
       }catch(err){
         stopPreshowImmediately();
