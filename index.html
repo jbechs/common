@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.3</div>
+      <div class="subtitle">v3.4</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -196,6 +196,12 @@
     let sustainedBadStreak = 0;
     let serverClockOffsetMs = 0;
     let lastClockSyncDebug = "";
+    let performanceClockFrozen = false;
+    let frozenSyncedEpochMs = null;
+    let frozenPerformanceNowMs = null;
+    let localMainAudioUrl = null;
+    let mainAudioFullyLocal = false;
+    let mainAudioBytes = null;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -225,7 +231,25 @@
     }
 
     function syncedNowMs(){
+      if(performanceClockFrozen && frozenSyncedEpochMs != null && frozenPerformanceNowMs != null){
+        return frozenSyncedEpochMs + (performance.now() - frozenPerformanceNowMs);
+      }
+
       return highResNowMs() + serverClockOffsetMs;
+    }
+
+    function freezePerformanceClock(){
+      if(performanceClockFrozen) return;
+
+      frozenSyncedEpochMs = highResNowMs() + serverClockOffsetMs;
+      frozenPerformanceNowMs = performance.now();
+      performanceClockFrozen = true;
+    }
+
+    function unfreezePerformanceClock(){
+      performanceClockFrozen = false;
+      frozenSyncedEpochMs = null;
+      frozenPerformanceNowMs = null;
     }
 
     function setStatus(msg){
@@ -301,9 +325,43 @@
     function assignSourceIfNeeded(){
       if(sourceAssigned) return;
 
-      audio.src = AUDIO_URL;
+      audio.src = localMainAudioUrl || AUDIO_URL;
       audio.preload = "auto";
       sourceAssigned = true;
+    }
+
+    async function preloadMainAudioFully(){
+      if(mainAudioFullyLocal && localMainAudioUrl) return true;
+
+      setStatus("Downloading show audio…");
+      setDebug(`${lastClockSyncDebug} · Loading full main track locally before curtain.`);
+
+      const response = await fetch(AUDIO_URL, { cache: "force-cache" });
+      if(!response.ok){
+        throw new Error(`Main audio download failed: HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      if(!blob || blob.size <= 0){
+        throw new Error("Main audio download returned an empty file");
+      }
+
+      if(localMainAudioUrl){
+        URL.revokeObjectURL(localMainAudioUrl);
+      }
+
+      localMainAudioUrl = URL.createObjectURL(blob);
+      mainAudioBytes = blob.size;
+      mainAudioFullyLocal = true;
+
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+      sourceAssigned = false;
+      assignSourceIfNeeded();
+      audio.load();
+
+      return true;
     }
 
     function assignPreshowSourceIfNeeded(){
@@ -412,6 +470,7 @@
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
         `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥400 ms) · Hard seeks ${hardSeekCount}<br>` +
+        `Performance lock ${performanceClockFrozen ? "ON" : "off"} · Main audio ${mainAudioFullyLocal ? "LOCAL" : "network"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
@@ -662,10 +721,8 @@
     }
 
     function startDownload(){
-      assignSourceIfNeeded();
-      audio.preload = "auto";
-      audio.load();
-
+      // The preshow may use the network during preparation. The main show audio
+      // is fetched in full by preloadMainAudioFully() before playback is allowed.
       assignPreshowSourceIfNeeded();
       preshowAudio.preload = "auto";
       preshowAudio.load();
@@ -893,6 +950,10 @@
 
       await ensureMetadata();
 
+      // Curtain lock: from this point forward the show clock uses the last
+      // synchronized epoch plus performance.now(). No network resync is needed.
+      freezePerformanceClock();
+
       let offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
 
       if(!isFinite(audio.duration) || offsetSec >= audio.duration){
@@ -959,7 +1020,8 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(lastClockSyncDebug || "");
+      const localMb = mainAudioBytes ? (mainAudioBytes / (1024 * 1024)).toFixed(1) : "?";
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · Clock frozen · Main audio local (${localMb} MB)`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1038,6 +1100,7 @@
       clearPlaybackMonitors();
       clearCrossfade();
       resetPlaybackRate();
+      unfreezePerformanceClock();
 
       stopPreshowImmediately();
       hideStartNow();
@@ -1069,8 +1132,7 @@
 
         await syncServerClock();
 
-        setStatus("Downloading…");
-
+        await preloadMainAudioFully();
         await ensureMetadata();
         updateTransport();
 
@@ -1126,6 +1188,12 @@
         startNowButton.disabled = false;
       }
     }
+
+    window.addEventListener("beforeunload", ()=>{
+      if(localMainAudioUrl){
+        URL.revokeObjectURL(localMainAudioUrl);
+      }
+    });
 
     playButton.addEventListener("click", handlePrepare);
     startNowButton.addEventListener("click", handleManualStart);
