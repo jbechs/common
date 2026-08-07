@@ -127,7 +127,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.6</div>
+      <div class="subtitle">v3.7 · interruption-resilient</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -200,6 +200,13 @@
     let frozenSyncedEpochMs = null;
     let frozenPerformanceNowMs = null;
     let networkWasOnlineAtCurtain = null;
+    let startNowMode = "begin";
+    let interruptionRecoveryTimer = null;
+    let interruptionRecoveryInFlight = false;
+    let interruptionAwaitingTap = false;
+    let interruptionCount = 0;
+    let interruptionAutoRecoveries = 0;
+    let interruptionManualRecoveries = 0;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -222,6 +229,7 @@
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const HARD_SEEK_MAX_COUNT = 6;
     const NORMAL_RATE = 1.0;
+    const INTERRUPTION_RECOVERY_DELAY_MS = 700;
 
     const PRESHOW_VOLUME = 1.0;
     const MAIN_VOLUME = 1.0;
@@ -278,12 +286,15 @@
       audio.controls = false;
     }
 
-    function showStartNow(){
+    function showStartNow(mode = "begin"){
+      startNowMode = mode;
+      startNowButton.textContent = mode === "resume" ? "Resume" : "Begin";
       startNowButton.classList.remove("hidden");
     }
 
     function hideStartNow(){
       startNowButton.classList.add("hidden");
+      if(startNowMode !== "resume") startNowButton.textContent = "Begin";
     }
 
     function clearTimers(){
@@ -440,6 +451,7 @@
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
         `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥420 ms) · Hard seeks ${hardSeekCount}/${HARD_SEEK_MAX_COUNT}${hardSeekCount >= HARD_SEEK_MAX_COUNT ? " · LIMIT REACHED" : ""}<br>` +
+        `Interruptions ${interruptionCount} · recovered ${interruptionAutoRecoveries + interruptionManualRecoveries} (${interruptionAutoRecoveries} auto · ${interruptionManualRecoveries} tap)<br>` +
         `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
@@ -952,6 +964,130 @@
       transportInterval = setInterval(updateTransport, TRANSPORT_UPDATE_MS);
     }
 
+
+    function performanceShouldBePlaying(){
+      if(!performanceClockFrozen || scheduledAnchorMs == null || audio.ended) return false;
+      if(!isFinite(audio.duration) || audio.duration <= 0) return false;
+
+      const expected = getExpectedTrackTimeSec();
+      return expected != null && expected >= 0 && expected < audio.duration - 0.25;
+    }
+
+    function clearInterruptionRecoveryTimer(){
+      if(interruptionRecoveryTimer){
+        clearTimeout(interruptionRecoveryTimer);
+        interruptionRecoveryTimer = null;
+      }
+    }
+
+    function offerResumeAfterInterruption(detail = "Audio interrupted"){
+      clearInterruptionRecoveryTimer();
+      interruptionAwaitingTap = true;
+      waitingForManualStart = false;
+      startNowButton.disabled = false;
+      showStartNow("resume");
+      setStatus(`${detail} — tap Resume`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · Performance clock preserved; Resume will rejoin the live show position.`);
+      updateDriftStats();
+    }
+
+    async function recoverInterruptedPlayback(fromUserGesture = false){
+      if(interruptionRecoveryInFlight) return false;
+      if(!performanceShouldBePlaying()) return false;
+
+      interruptionRecoveryInFlight = true;
+      clearInterruptionRecoveryTimer();
+
+      try{
+        let expected = getExpectedTrackTimeSec();
+        if(expected == null || !isFinite(expected)) return false;
+        expected = Math.max(0, Math.min(expected, audio.duration - 0.05));
+
+        // Re-use the same principle as late join: the frozen show clock is truth.
+        // If the target is already buffered, jump directly there before resuming.
+        const bufferedEnd = getBufferedEndFor(expected);
+        if(bufferedEnd > expected + 0.25){
+          audio.currentTime = expected;
+          await waitForSeek();
+        }
+
+        audio.muted = false;
+        audio.volume = MAIN_VOLUME;
+        await audio.play();
+
+        if(audio.paused) throw new Error("Playback remained paused");
+
+        interruptionAwaitingTap = false;
+        startNowMode = "begin";
+        hideStartNow();
+        lockBeginButton();
+        lastDriftSec = getCurrentDriftSec();
+
+        if(fromUserGesture){
+          interruptionManualRecoveries += 1;
+        }else{
+          interruptionAutoRecoveries += 1;
+        }
+
+        setStatus("Playing");
+        setDebug(`${lastClockSyncDebug || "Clock prepared"} · Recovered from interruption at ${formatClockTime(audio.currentTime)}; show clock preserved.`);
+        updateTransport();
+        updateDriftStats();
+        return true;
+      }catch(err){
+        offerResumeAfterInterruption("Audio interrupted");
+        return false;
+      }finally{
+        interruptionRecoveryInFlight = false;
+      }
+    }
+
+    function scheduleAutomaticInterruptionRecovery(reason = "Audio interrupted"){
+      if(!performanceShouldBePlaying() || !audio.paused || interruptionRecoveryInFlight) return;
+      if(interruptionAwaitingTap && document.visibilityState === "visible") return;
+
+      clearInterruptionRecoveryTimer();
+      setStatus(`${reason} — recovering…`);
+
+      interruptionRecoveryTimer = setTimeout(()=>{
+        interruptionRecoveryTimer = null;
+        if(!performanceShouldBePlaying() || !audio.paused) return;
+        recoverInterruptedPlayback(false);
+      }, INTERRUPTION_RECOVERY_DELAY_MS);
+    }
+
+    function handleUnexpectedPerformancePause(){
+      updateTransport();
+      if(!performanceShouldBePlaying()) return;
+
+      interruptionCount += 1;
+      updateDriftStats();
+
+      // A visible-page pause can be an audio-route loss. Auto-resuming here could
+      // unexpectedly blast the soundtrack through the phone speaker, so require
+      // one deliberate tap. If the page is hidden (e.g. phone call/app interruption),
+      // preserve the clock and attempt an automatic rejoin when the page returns.
+      if(document.visibilityState === "hidden"){
+        interruptionAwaitingTap = true;
+        setStatus("Audio interrupted — waiting to recover");
+        return;
+      }
+
+      offerResumeAfterInterruption("Audio interrupted");
+    }
+
+    async function handleResumeTap(){
+      startNowButton.disabled = true;
+      try{
+        const recovered = await recoverInterruptedPlayback(true);
+        if(!recovered && performanceShouldBePlaying()){
+          offerResumeAfterInterruption("Audio interrupted");
+        }
+      }finally{
+        startNowButton.disabled = false;
+      }
+    }
+
     async function startPlaybackAtCurrentCorrectOffset(){
       if(scheduledAnchorMs == null){
         throw new Error("No scheduled anchor");
@@ -1113,6 +1249,7 @@
       unfreezePerformanceClock();
 
       stopPreshowImmediately();
+      startNowMode = "begin";
       hideStartNow();
       waitingForManualStart = false;
       startAttempted = false;
@@ -1201,7 +1338,13 @@
     }
 
     playButton.addEventListener("click", handlePrepare);
-    startNowButton.addEventListener("click", handleManualStart);
+    startNowButton.addEventListener("click", ()=>{
+      if(startNowMode === "resume"){
+        handleResumeTap();
+      }else{
+        handleManualStart();
+      }
+    });
 
     audio.addEventListener("loadedmetadata", ()=>{
       updateTransport();
@@ -1256,12 +1399,18 @@
     });
 
     audio.addEventListener("playing", ()=>{
+      clearInterruptionRecoveryTimer();
+      interruptionAwaitingTap = false;
+      if(startNowMode === "resume"){
+        startNowMode = "begin";
+        hideStartNow();
+      }
       lockBeginButton();
       setStatus("Playing");
       updateTransport();
     });
 
-    audio.addEventListener("pause", updateTransport);
+    audio.addEventListener("pause", handleUnexpectedPerformancePause);
 
     audio.addEventListener("ended", ()=>{
       clearTimers();
@@ -1307,6 +1456,18 @@
 
     window.addEventListener("online", noteNetworkChange);
     window.addEventListener("offline", noteNetworkChange);
+
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState === "visible" && performanceShouldBePlaying() && audio.paused){
+        scheduleAutomaticInterruptionRecovery("Returning to performance");
+      }
+    });
+
+    window.addEventListener("pageshow", ()=>{
+      if(performanceShouldBePlaying() && audio.paused){
+        scheduleAutomaticInterruptionRecovery("Returning to performance");
+      }
+    });
 
     updateTransport();
     updateDriftStats();
