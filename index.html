@@ -214,10 +214,13 @@
     // 350 ms remains the preferred operating band for diagnostics.
     // A hard seek now requires a sustained poor state: >=420 ms for
     // three consecutive 1-second checks, plus the existing cooldown.
+    // After six successful hard seeks, the controller concedes for the rest of the run
+    // and prioritizes uninterrupted playback over further correction attempts.
     const PREFERRED_DRIFT_BAND_SEC = 0.35;
     const HARD_SEEK_TRIGGER_SEC = 0.42;
     const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
+    const HARD_SEEK_MAX_COUNT = 6;
     const NORMAL_RATE = 1.0;
 
     const PRESHOW_VOLUME = 1.0;
@@ -436,7 +439,7 @@
         `Best ${bestAbsDriftSec == null ? "—" : `${Math.round(bestAbsDriftSec * 1000)} ms`} · ` +
         `Worst ${worstAbsDriftSec == null ? "—" : `${Math.round(worstAbsDriftSec * 1000)} ms`}<br>` +
         `Under 150 ${pct(samplesUnder150)} · Under 250 ${pct(samplesUnder250)} · Under 350 ${pct(samplesUnderThreshold)} · Above 350 ${pct(samplesAtOrAboveThreshold)}<br>` +
-        `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥420 ms) · Hard seeks ${hardSeekCount}<br>` +
+        `Bad-state streak ${sustainedBadStreak}/${HARD_SEEK_REQUIRED_CHECKS} (≥420 ms) · Hard seeks ${hardSeekCount}/${HARD_SEEK_MAX_COUNT}${hardSeekCount >= HARD_SEEK_MAX_COUNT ? " · LIMIT REACHED" : ""}<br>` +
         `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Post-seek settling: ${settlingText}`;
@@ -917,6 +920,17 @@
       const nowMs = highResNowMs();
       const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
       const sustainedBadState = sustainedBadStreak >= HARD_SEEK_REQUIRED_CHECKS;
+      const correctionLimitReached = hardSeekCount >= HARD_SEEK_MAX_COUNT;
+
+      if(correctionLimitReached){
+        // Concede for the remainder of this run. Continued seeking would create
+        // more audience disturbance than the stable residual drift is worth.
+        sustainedBadStreak = 0;
+        setStatus("Playing · correction limit reached");
+        updateDriftStats();
+        updateTransport();
+        return;
+      }
 
       if(sustainedBadState && cooldownElapsed){
         lastHardSeekAtMs = nowMs;
