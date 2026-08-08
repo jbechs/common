@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.9.2</div>
+      <div class="subtitle">v3.8 · bounded interruption recovery</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -248,6 +248,11 @@
     let pendingTimingOperation = null;
     let latestStartTiming = null;
     let latestRecoveryTiming = null;
+    let selfCalibrationTimer = null;
+    let selfCalibrationAttempted = false;
+    let selfCalibrationApplied = false;
+    let selfCalibrationMeasuredMs = null;
+    let selfCalibrationResultMs = null;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -269,9 +274,12 @@
     const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const HARD_SEEK_MAX_COUNT = 6;
-    // EXPERIMENT ONLY: advance initial/join playback target by 300 ms
-    // to test whether stable residual drift can be compensated at start.
-    const START_TARGET_BIAS_SEC = 0.30;
+    // EXPERIMENT: device/run self-calibration.
+    // Begin at the canonical target with no platform-specific bias.
+    const START_TARGET_BIAS_SEC = 0;
+    const SELF_CALIBRATION_DELAY_MS = 1200;
+    const SELF_CALIBRATION_THRESHOLD_SEC = 0.120;
+    const SELF_CALIBRATION_MAX_ABS_SEC = 0.750;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -407,7 +415,63 @@
       timingProbeEl.innerHTML =
         `${timingSummary("Start", latestStartTiming)}<br>` +
         `${timingSummary("Recovery", latestRecoveryTiming)}<br>` +
+        `${calibrationSummary()}<br>` +
         pendingText;
+    }
+
+    function clearSelfCalibrationTimer(){
+      if(selfCalibrationTimer){
+        clearTimeout(selfCalibrationTimer);
+        selfCalibrationTimer = null;
+      }
+    }
+
+    function calibrationSummary(){
+      if(!selfCalibrationAttempted) return "Self-calibration: waiting";
+      const measured = selfCalibrationMeasuredMs == null ? "—" : `${selfCalibrationMeasuredMs} ms`;
+      const result = selfCalibrationResultMs == null ? "—" : `${selfCalibrationResultMs} ms`;
+      if(!selfCalibrationApplied) return `Self-calibration: measured ${measured} · no correction`;
+      return `Self-calibration: measured ${measured} · one correction · settled ${result}`;
+    }
+
+    async function runSelfCalibration(){
+      clearSelfCalibrationTimer();
+      if(selfCalibrationAttempted || audio.ended || audio.paused) return;
+      if(!performanceClockFrozen || frozenAnchorMs == null) return;
+      if(interruptionRecoveryInFlight || interruptionAwaitingTap) return;
+
+      selfCalibrationAttempted = true;
+      const measuredDriftSec = getCurrentDriftSec();
+      selfCalibrationMeasuredMs = Math.round(measuredDriftSec * 1000);
+
+      if(Math.abs(measuredDriftSec) < SELF_CALIBRATION_THRESHOLD_SEC ||
+         Math.abs(measuredDriftSec) > SELF_CALIBRATION_MAX_ABS_SEC){
+        updateTimingProbe();
+        return;
+      }
+
+      selfCalibrationApplied = true;
+      try{
+        const expectedNow = getExpectedTrackTimeSec();
+        const target = Math.max(0, Math.min(expectedNow, Math.max(0, audio.duration - 0.05)));
+        audio.currentTime = target;
+        await waitForSeek();
+
+        setTimeout(()=>{
+          if(!audio.ended){
+            selfCalibrationResultMs = Math.round(getCurrentDriftSec() * 1000);
+            updateTimingProbe();
+          }
+        }, 1200);
+      }catch(err){
+        selfCalibrationApplied = false;
+      }
+      updateTimingProbe();
+    }
+
+    function scheduleSelfCalibration(){
+      clearSelfCalibrationTimer();
+      selfCalibrationTimer = setTimeout(runSelfCalibration, SELF_CALIBRATION_DELAY_MS);
     }
 
     function showPlayer(){
@@ -1343,7 +1407,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · +${Math.round(START_TARGET_BIAS_SEC * 1000)} ms start-bias test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · self-calibration test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1438,6 +1502,11 @@
       pendingTimingOperation = null;
       latestStartTiming = null;
       latestRecoveryTiming = null;
+      clearSelfCalibrationTimer();
+      selfCalibrationAttempted = false;
+      selfCalibrationApplied = false;
+      selfCalibrationMeasuredMs = null;
+      selfCalibrationResultMs = null;
       updateTimingProbe();
 
       setDebug("");
@@ -1593,6 +1662,9 @@
         op.residualAtPlayingSec = getCurrentDriftSec();
         scheduleSettlingSamples(op);
         finishTimingOperation(op);
+        if(op.kind === "start"){
+          scheduleSelfCalibration();
+        }
       }
 
       clearInterruptionRecoveryTimer();
