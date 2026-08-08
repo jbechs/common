@@ -123,9 +123,9 @@
     }
 
     .timingProbe{
-      font-size:.78rem;
+      font-size:.76rem;
       color:#666;
-      line-height:1.35;
+      line-height:1.4;
       word-break:break-word;
     }
 
@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.9.1</div>
+      <div class="subtitle">v3.9.2</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -343,7 +343,8 @@
         playingEventAtMs: null,
         expectedAtCalculationSec: getExpectedTrackTimeSec(),
         mediaAtCalculationSec: audio.currentTime || 0,
-        residualAtPlayingSec: null
+        residualAtPlayingSec: null,
+        settlingSamplesMs: {}
       };
       pendingTimingOperation = op;
       updateTimingProbe();
@@ -373,7 +374,29 @@
       const calcToPlaying = msBetween(op.calculatedAtMs, op.playingEventAtMs);
       const residualMs = op.residualAtPlayingSec == null ? null : Math.round(op.residualAtPlayingSec * 1000);
 
-      return `${label}: calc→seek ${fmtMs(calcToSeek)} · seek ${fmtMs(seekWait)} · seek→play ${fmtMs(seekToPlay)} · play promise ${fmtMs(playPromise)} · calc→playing ${fmtMs(calcToPlaying)} · residual ${fmtMs(residualMs)}`;
+      const s = op.settlingSamplesMs || {};
+      const settlingText =
+        `0 ${fmtMs(residualMs)} · 100 ${fmtMs(s[100])} · 250 ${fmtMs(s[250])} · ` +
+        `500 ${fmtMs(s[500])} · 1s ${fmtMs(s[1000])} · 2s ${fmtMs(s[2000])} · ` +
+        `3s ${fmtMs(s[3000])} · 5s ${fmtMs(s[5000])}`;
+
+      return `${label}: calc→seek ${fmtMs(calcToSeek)} · seek ${fmtMs(seekWait)} · seek→play ${fmtMs(seekToPlay)} · play promise ${fmtMs(playPromise)} · calc→playing ${fmtMs(calcToPlaying)}<br>` +
+        `${label} settling: ${settlingText}`;
+    }
+
+    function scheduleSettlingSamples(op){
+      if(!op || op.playingEventAtMs == null) return;
+
+      const delays = [100, 250, 500, 1000, 2000, 3000, 5000];
+
+      for(const delay of delays){
+        setTimeout(()=>{
+          if(audio.ended) return;
+          const driftMs = Math.round(getCurrentDriftSec() * 1000);
+          op.settlingSamplesMs[delay] = driftMs;
+          updateTimingProbe();
+        }, delay);
+      }
     }
 
     function updateTimingProbe(){
@@ -1568,6 +1591,7 @@
         const op = pendingTimingOperation;
         op.playingEventAtMs = highResNowMs();
         op.residualAtPlayingSec = getCurrentDriftSec();
+        scheduleSettlingSamples(op);
         finishTimingOperation(op);
       }
 
