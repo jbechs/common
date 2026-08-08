@@ -104,6 +104,28 @@
       word-break:break-word;
     }
 
+    .diagnosticsToggle{
+      width:100%;
+      min-width:0;
+      padding:8px 12px;
+      border-radius:6px;
+      background:#131313;
+      color:#242424;
+      font-size:.72rem;
+      font-weight:400;
+      letter-spacing:.03em;
+      justify-self:stretch;
+    }
+
+    .diagnosticsPanel{
+      display:grid;
+      gap:6px;
+    }
+
+    .diagnosticsPanel.hidden{
+      display:none;
+    }
+
     .hidden{
       display:none;
     }
@@ -127,7 +149,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.8</div>
+      <div class="subtitle">v3.8 · bounded interruption recovery</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -138,9 +160,12 @@
 
     <div id="countdown" class="countdown"></div>
     <div id="status" class="status">Ready.</div>
-    <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
-    <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
-    <div id="debug" class="debug"></div>
+    <button id="diagnosticsToggle" class="diagnosticsToggle" type="button" aria-expanded="false">info</button>
+    <div id="diagnosticsPanel" class="diagnosticsPanel hidden">
+      <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
+      <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
+      <div id="debug" class="debug"></div>
+    </div>
 
     <audio id="audio" preload="auto" playsinline class="hidden"></audio>
     <audio id="preshowAudio" preload="auto" playsinline loop class="hidden"></audio>
@@ -158,6 +183,8 @@
     const startInput = document.getElementById("startTime");
     const statusEl = document.getElementById("status");
     const countdownEl = document.getElementById("countdown");
+    const diagnosticsToggle = document.getElementById("diagnosticsToggle");
+    const diagnosticsPanel = document.getElementById("diagnosticsPanel");
     const transportEl = document.getElementById("transport");
     const driftStatsEl = document.getElementById("driftStats");
     const debugEl = document.getElementById("debug");
@@ -1357,6 +1384,12 @@
         startNowButton.disabled = false;
       }
     }
+
+    diagnosticsToggle.addEventListener("click", ()=>{
+      const isHidden = diagnosticsPanel.classList.toggle("hidden");
+      diagnosticsToggle.setAttribute("aria-expanded", String(!isHidden));
+      diagnosticsToggle.textContent = "info";
+    });
 
     playButton.addEventListener("click", handlePrepare);
     startNowButton.addEventListener("click", ()=>{
