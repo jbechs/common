@@ -122,6 +122,13 @@
       gap:6px;
     }
 
+    .timingProbe{
+      font-size:.78rem;
+      color:#666;
+      line-height:1.35;
+      word-break:break-word;
+    }
+
     .diagnosticsPanel.hidden{
       display:none;
     }
@@ -149,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.9</div>
+      <div class="subtitle">v3.9.1</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -164,6 +171,7 @@
     <button id="diagnosticsToggle" class="diagnosticsToggle" type="button" aria-expanded="false">info</button>
     <div id="diagnosticsPanel" class="diagnosticsPanel hidden">
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
+      <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
     </div>
 
@@ -187,6 +195,7 @@
     const diagnosticsPanel = document.getElementById("diagnosticsPanel");
     const transportEl = document.getElementById("transport");
     const driftStatsEl = document.getElementById("driftStats");
+    const timingProbeEl = document.getElementById("timingProbe");
     const debugEl = document.getElementById("debug");
 
     let countdownFrame = null;
@@ -234,6 +243,11 @@
     let interruptionCount = 0;
     let interruptionAutoRecoveries = 0;
     let interruptionManualRecoveries = 0;
+
+    let timingOperationId = 0;
+    let pendingTimingOperation = null;
+    let latestStartTiming = null;
+    let latestRecoveryTiming = null;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -305,6 +319,72 @@
 
     function setDebug(msg){
       debugEl.textContent = msg || "";
+    }
+
+    function msBetween(a, b){
+      if(a == null || b == null) return null;
+      return Math.round(b - a);
+    }
+
+    function fmtMs(value){
+      return value == null ? "—" : `${value} ms`;
+    }
+
+    function beginTimingOperation(kind){
+      const now = highResNowMs();
+      const op = {
+        id: ++timingOperationId,
+        kind,
+        calculatedAtMs: now,
+        seekAssignedAtMs: null,
+        seekedAtMs: null,
+        playCalledAtMs: null,
+        playResolvedAtMs: null,
+        playingEventAtMs: null,
+        expectedAtCalculationSec: getExpectedTrackTimeSec(),
+        mediaAtCalculationSec: audio.currentTime || 0,
+        residualAtPlayingSec: null
+      };
+      pendingTimingOperation = op;
+      updateTimingProbe();
+      return op;
+    }
+
+    function finishTimingOperation(op){
+      if(!op) return;
+      if(op.kind === "start"){
+        latestStartTiming = op;
+      }else if(op.kind === "recovery"){
+        latestRecoveryTiming = op;
+      }
+      if(pendingTimingOperation && pendingTimingOperation.id === op.id){
+        pendingTimingOperation = null;
+      }
+      updateTimingProbe();
+    }
+
+    function timingSummary(label, op){
+      if(!op) return `${label}: —`;
+
+      const calcToSeek = msBetween(op.calculatedAtMs, op.seekAssignedAtMs);
+      const seekWait = msBetween(op.seekAssignedAtMs, op.seekedAtMs);
+      const seekToPlay = msBetween(op.seekedAtMs, op.playCalledAtMs);
+      const playPromise = msBetween(op.playCalledAtMs, op.playResolvedAtMs);
+      const calcToPlaying = msBetween(op.calculatedAtMs, op.playingEventAtMs);
+      const residualMs = op.residualAtPlayingSec == null ? null : Math.round(op.residualAtPlayingSec * 1000);
+
+      return `${label}: calc→seek ${fmtMs(calcToSeek)} · seek ${fmtMs(seekWait)} · seek→play ${fmtMs(seekToPlay)} · play promise ${fmtMs(playPromise)} · calc→playing ${fmtMs(calcToPlaying)} · residual ${fmtMs(residualMs)}`;
+    }
+
+    function updateTimingProbe(){
+      const pendingText = pendingTimingOperation
+        ? `Pending ${pendingTimingOperation.kind} timing…`
+        : "No timing operation pending";
+
+      timingProbeEl.innerHTML =
+        `${timingSummary("Start", latestStartTiming)}<br>` +
+        `${timingSummary("Recovery", latestRecoveryTiming)}<br>` +
+        pendingText;
     }
 
     function showPlayer(){
@@ -1029,6 +1109,8 @@
       interruptionRecoveryInFlight = true;
       clearInterruptionRecoveryTimer();
 
+      const timingOp = beginTimingOperation("recovery");
+
       try{
         let expected = getExpectedTrackTimeSec();
         if(expected == null || !isFinite(expected)) return false;
@@ -1038,13 +1120,17 @@
         // If the target is already buffered, jump directly there before resuming.
         const bufferedEnd = getBufferedEndFor(expected);
         if(bufferedEnd > expected + 0.25){
+          timingOp.seekAssignedAtMs = highResNowMs();
           audio.currentTime = expected;
           await waitForSeek();
+          timingOp.seekedAtMs = highResNowMs();
         }
 
         audio.muted = false;
         audio.volume = MAIN_VOLUME;
+        timingOp.playCalledAtMs = highResNowMs();
         await audio.play();
+        timingOp.playResolvedAtMs = highResNowMs();
 
         if(audio.paused) throw new Error("Playback remained paused");
 
@@ -1066,6 +1152,9 @@
         updateDriftStats();
         return true;
       }catch(err){
+        if(pendingTimingOperation && pendingTimingOperation.id === timingOp.id){
+          finishTimingOperation(timingOp);
+        }
         offerResumeAfterInterruption("Audio interrupted");
         return false;
       }finally{
@@ -1151,7 +1240,10 @@
       // Network changes cannot alter the show timeline.
       freezePerformanceClock();
 
+      const timingOp = beginTimingOperation("start");
+
       let offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
+      timingOp.expectedAtCalculationSec = offsetSec;
 
       if(!isFinite(audio.duration) || offsetSec >= audio.duration){
         stopPreshowImmediately();
@@ -1169,8 +1261,10 @@
         setDebug(`${lastClockSyncDebug} · Seeking to ${formatClockTime(offsetSec)}.`);
 
         const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = biasedJoinTarget;
         await waitForSeek();
+        timingOp.seekedAtMs = highResNowMs();
 
         const playable = await waitForPlayableAt(biasedJoinTarget);
 
@@ -1184,8 +1278,10 @@
 
         if(offsetSec < audio.duration){
           const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+          timingOp.seekAssignedAtMs = highResNowMs();
           audio.currentTime = biasedJoinTarget;
           await waitForSeek();
+          timingOp.seekedAtMs = highResNowMs();
         }
       }else{
         if(!hasEnoughToStartAt(offsetSec)){
@@ -1195,8 +1291,10 @@
         }
 
         const biasedStartTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = biasedStartTarget;
         await waitForSeek();
+        timingOp.seekedAtMs = highResNowMs();
       }
 
       showPlayer();
@@ -1209,7 +1307,9 @@
 
       audio.muted = false;
 
+      timingOp.playCalledAtMs = highResNowMs();
       await audio.play();
+      timingOp.playResolvedAtMs = highResNowMs();
 
       crossfadeFromPreshowToMain();
 
@@ -1311,6 +1411,11 @@
       lastHardSeekAtMs = 0;
       resetDriftStats();
       audio.volume = MAIN_VOLUME;
+
+      pendingTimingOperation = null;
+      latestStartTiming = null;
+      latestRecoveryTiming = null;
+      updateTimingProbe();
 
       setDebug("");
 
@@ -1459,6 +1564,13 @@
     });
 
     audio.addEventListener("playing", ()=>{
+      if(pendingTimingOperation){
+        const op = pendingTimingOperation;
+        op.playingEventAtMs = highResNowMs();
+        op.residualAtPlayingSec = getCurrentDriftSec();
+        finishTimingOperation(op);
+      }
+
       clearInterruptionRecoveryTimer();
       interruptionAwaitingTap = false;
       if(startNowMode === "resume"){
@@ -1531,6 +1643,7 @@
 
     updateTransport();
     updateDriftStats();
+    updateTimingProbe();
   </script>
 </body>
 </html>
