@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.9.4</div>
+      <div class="subtitle">v3.9.5</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -248,13 +248,11 @@
     let pendingTimingOperation = null;
     let latestStartTiming = null;
     let latestRecoveryTiming = null;
-    let selfCalibrationTimer = null;
-    let selfCalibrationAttempted = false;
-    let selfCalibrationApplied = false;
-    let selfCalibrationMeasuredMs = null;
-    let selfCalibrationSettlingShiftMs = null;
-    let selfCalibrationBiasMs = null;
-    let selfCalibrationResultMs = null;
+
+    let startupCalibrationBiasSec = 0;
+    let startupCalibrationMeasured = false;
+    let startupCalibrationRealElapsedMs = null;
+    let startupCalibrationMediaElapsedMs = null;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -276,12 +274,13 @@
     const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const HARD_SEEK_MAX_COUNT = 6;
-    // EXPERIMENT: device/run self-calibration.
-    // Begin at the canonical target with no platform-specific bias.
-    const START_TARGET_BIAS_SEC = 0;
-    const SELF_CALIBRATION_DELAY_MS = 1200;
-    const SELF_CALIBRATION_THRESHOLD_SEC = 0.120;
-    const SELF_CALIBRATION_MAX_ABS_SEC = 0.750;
+    // EXPERIMENT: pre-curtain device/run calibration.
+    // No platform sniffing and no universal fixed bias. During preparation,
+    // the main track briefly runs muted and measures how much media time is
+    // lost while the playback pipeline settles. The real start then aims ahead
+    // by that measured amount.
+    const START_CALIBRATION_SAMPLE_MS = 1200;
+    const START_CALIBRATION_MAX_BIAS_SEC = 0.75;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -409,112 +408,25 @@
       }
     }
 
+    function calibrationProbeSummary(){
+      if(!startupCalibrationMeasured){
+        return "Pre-curtain calibration: —";
+      }
+
+      const biasMs = Math.round(startupCalibrationBiasSec * 1000);
+      return `Pre-curtain calibration: real ${fmtMs(startupCalibrationRealElapsedMs)} · media ${fmtMs(startupCalibrationMediaElapsedMs)} · learned bias ${biasMs} ms`;
+    }
+
     function updateTimingProbe(){
       const pendingText = pendingTimingOperation
         ? `Pending ${pendingTimingOperation.kind} timing…`
         : "No timing operation pending";
 
       timingProbeEl.innerHTML =
+        `${calibrationProbeSummary()}<br>` +
         `${timingSummary("Start", latestStartTiming)}<br>` +
         `${timingSummary("Recovery", latestRecoveryTiming)}<br>` +
-        `${calibrationSummary()}<br>` +
         pendingText;
-    }
-
-    function clearSelfCalibrationTimer(){
-      if(selfCalibrationTimer){
-        clearTimeout(selfCalibrationTimer);
-        selfCalibrationTimer = null;
-      }
-    }
-
-    function calibrationSummary(){
-      if(!selfCalibrationAttempted) return "Self-calibration: waiting";
-      const measured = selfCalibrationMeasuredMs == null ? "—" : `${selfCalibrationMeasuredMs} ms`;
-      const shift = selfCalibrationSettlingShiftMs == null ? "—" : `${selfCalibrationSettlingShiftMs} ms`;
-      const bias = selfCalibrationBiasMs == null ? "—" : `${selfCalibrationBiasMs} ms`;
-      const result = selfCalibrationResultMs == null ? "—" : `${selfCalibrationResultMs} ms`;
-      if(!selfCalibrationApplied){
-        return `Self-calibration: measured ${measured} · settling shift ${shift} · no correction`;
-      }
-      return `Self-calibration: measured ${measured} · settling shift ${shift} · predictive bias ${bias} · settled ${result}`;
-    }
-
-    async function runSelfCalibration(){
-      clearSelfCalibrationTimer();
-      if(selfCalibrationAttempted || audio.ended || audio.paused) return;
-      if(!performanceClockFrozen || frozenAnchorMs == null) return;
-      if(interruptionRecoveryInFlight || interruptionAwaitingTap) return;
-
-      selfCalibrationAttempted = true;
-
-      const measuredDriftSec = getCurrentDriftSec();
-      selfCalibrationMeasuredMs = Math.round(measuredDriftSec * 1000);
-
-      // Learn the device/run's own startup settling shift.
-      // Positive shift means playback fell farther behind after "playing".
-      const startOp = latestStartTiming;
-      const driftAtPlayingMs = startOp && startOp.residualAtPlayingSec != null
-        ? Math.round(startOp.residualAtPlayingSec * 1000)
-        : null;
-      const driftAt1sMs = startOp && startOp.settlingSamplesMs
-        ? startOp.settlingSamplesMs[1000]
-        : null;
-
-      if(driftAtPlayingMs != null && driftAt1sMs != null){
-        selfCalibrationSettlingShiftMs = driftAt1sMs - driftAtPlayingMs;
-      }else{
-        selfCalibrationSettlingShiftMs = null;
-      }
-
-      if(Math.abs(measuredDriftSec) < SELF_CALIBRATION_THRESHOLD_SEC){
-        updateTimingProbe();
-        return;
-      }
-
-      if(
-        selfCalibrationSettlingShiftMs == null ||
-        Math.abs(selfCalibrationSettlingShiftMs) > SELF_CALIBRATION_MAX_ABS_SEC * 1000
-      ){
-        updateTimingProbe();
-        return;
-      }
-
-      const predictiveBiasSec = selfCalibrationSettlingShiftMs / 1000;
-      selfCalibrationBiasMs = Math.round(predictiveBiasSec * 1000);
-      selfCalibrationApplied = true;
-
-      try{
-        // Recompute the canonical target now, then pre-compensate by exactly
-        // the startup settling shift observed on this device/run.
-        const expectedNow = getExpectedTrackTimeSec();
-        const target = Math.max(
-          0,
-          Math.min(
-            expectedNow + predictiveBiasSec,
-            Math.max(0, audio.duration - 0.05)
-          )
-        );
-
-        audio.currentTime = target;
-        await waitForSeek();
-
-        setTimeout(()=>{
-          if(!audio.ended){
-            selfCalibrationResultMs = Math.round(getCurrentDriftSec() * 1000);
-            updateTimingProbe();
-          }
-        }, 1200);
-      }catch(err){
-        selfCalibrationApplied = false;
-      }
-
-      updateTimingProbe();
-    }
-
-    function scheduleSelfCalibration(){
-      clearSelfCalibrationTimer();
-      selfCalibrationTimer = setTimeout(runSelfCalibration, SELF_CALIBRATION_DELAY_MS);
     }
 
     function showPlayer(){
@@ -939,6 +851,108 @@
         return true;
       }catch(err){
         audio.muted = false;
+        return false;
+      }
+    }
+
+    function waitForPlayingEvent(timeoutMs = 3000){
+      return new Promise(resolve=>{
+        let finished = false;
+
+        const timeout = setTimeout(()=>{
+          cleanup();
+          resolve(false);
+        }, timeoutMs);
+
+        function cleanup(){
+          if(finished) return;
+          finished = true;
+          clearTimeout(timeout);
+          audio.removeEventListener("playing", onPlaying);
+        }
+
+        function onPlaying(){
+          cleanup();
+          resolve(true);
+        }
+
+        audio.addEventListener("playing", onPlaying, { once:true });
+      });
+    }
+
+    async function calibrateStartupBias(){
+      startupCalibrationBiasSec = 0;
+      startupCalibrationMeasured = false;
+      startupCalibrationRealElapsedMs = null;
+      startupCalibrationMediaElapsedMs = null;
+      updateTimingProbe();
+
+      try{
+        assignSourceIfNeeded();
+        await ensureMetadata();
+
+        audio.pause();
+        audio.muted = true;
+        audio.volume = MAIN_VOLUME;
+
+        const calibrationStartSec =
+          isFinite(audio.duration) && audio.duration > 3
+            ? 1.0
+            : 0;
+
+        audio.currentTime = calibrationStartSec;
+        await waitForSeek();
+
+        const playingPromise = waitForPlayingEvent();
+        await audio.play();
+        const didPlay = await playingPromise;
+
+        if(!didPlay || audio.paused){
+          throw new Error("Calibration playback did not establish");
+        }
+
+        // Start measuring only once the browser declares the media "playing".
+        // The quantity we want is how much less media time advances than real
+        // high-resolution time during the settling window.
+        const realStartMs = highResNowMs();
+        const mediaStartSec = audio.currentTime;
+
+        await new Promise(resolve=>setTimeout(resolve, START_CALIBRATION_SAMPLE_MS));
+
+        const realEndMs = highResNowMs();
+        const mediaEndSec = audio.currentTime;
+
+        const realElapsedSec = Math.max(0, (realEndMs - realStartMs) / 1000);
+        const mediaElapsedSec = Math.max(0, mediaEndSec - mediaStartSec);
+        const measuredLossSec = realElapsedSec - mediaElapsedSec;
+
+        startupCalibrationRealElapsedMs = Math.round(realElapsedSec * 1000);
+        startupCalibrationMediaElapsedMs = Math.round(mediaElapsedSec * 1000);
+        startupCalibrationBiasSec = Math.max(
+          -START_CALIBRATION_MAX_BIAS_SEC,
+          Math.min(START_CALIBRATION_MAX_BIAS_SEC, measuredLossSec)
+        );
+        startupCalibrationMeasured = true;
+
+        audio.pause();
+        audio.currentTime = 0;
+        await waitForSeek();
+        audio.muted = false;
+
+        updateTimingProbe();
+        return true;
+      }catch(err){
+        audio.pause();
+        try{
+          audio.currentTime = 0;
+          await waitForSeek();
+        }catch(resetErr){
+          // Best-effort reset only.
+        }
+        audio.muted = false;
+        startupCalibrationBiasSec = 0;
+        startupCalibrationMeasured = false;
+        updateTimingProbe();
         return false;
       }
     }
@@ -1390,7 +1404,7 @@
         setStatus("Joining in progress…");
         setDebug(`${lastClockSyncDebug} · Seeking to ${formatClockTime(offsetSec)}.`);
 
-        const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        const biasedJoinTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
         timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = biasedJoinTarget;
         await waitForSeek();
@@ -1407,7 +1421,7 @@
         offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
 
         if(offsetSec < audio.duration){
-          const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+          const biasedJoinTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
           timingOp.seekAssignedAtMs = highResNowMs();
           audio.currentTime = biasedJoinTarget;
           await waitForSeek();
@@ -1420,7 +1434,7 @@
           return false;
         }
 
-        const biasedStartTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        const biasedStartTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
         timingOp.seekAssignedAtMs = highResNowMs();
         audio.currentTime = biasedStartTarget;
         await waitForSeek();
@@ -1450,7 +1464,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · predictive self-calibration test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · measured start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1545,13 +1559,10 @@
       pendingTimingOperation = null;
       latestStartTiming = null;
       latestRecoveryTiming = null;
-      clearSelfCalibrationTimer();
-      selfCalibrationAttempted = false;
-      selfCalibrationApplied = false;
-      selfCalibrationMeasuredMs = null;
-      selfCalibrationSettlingShiftMs = null;
-      selfCalibrationBiasMs = null;
-      selfCalibrationResultMs = null;
+      startupCalibrationBiasSec = 0;
+      startupCalibrationMeasured = false;
+      startupCalibrationRealElapsedMs = null;
+      startupCalibrationMediaElapsedMs = null;
       updateTimingProbe();
 
       setDebug("");
@@ -1581,6 +1592,9 @@
         updateTransport();
 
         await primeAudioElement();
+
+        setStatus("Calibrating playback…");
+        await calibrateStartupBias();
 
         const startTimeMs = new Date(startInput.value).getTime();
         const offsetSec = (syncedNowMs() - startTimeMs) / 1000;
@@ -1707,9 +1721,6 @@
         op.residualAtPlayingSec = getCurrentDriftSec();
         scheduleSettlingSamples(op);
         finishTimingOperation(op);
-        if(op.kind === "start"){
-          scheduleSelfCalibration();
-        }
       }
 
       clearInterruptionRecoveryTimer();
