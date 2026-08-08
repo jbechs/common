@@ -149,7 +149,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.8</div>
+      <div class="subtitle">v3.9</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -255,6 +255,9 @@
     const HARD_SEEK_REQUIRED_CHECKS = 3;
     const HARD_SEEK_COOLDOWN_MS = 8000;
     const HARD_SEEK_MAX_COUNT = 6;
+    // EXPERIMENT ONLY: advance initial/join playback target by 300 ms
+    // to test whether stable residual drift can be compensated at start.
+    const START_TARGET_BIAS_SEC = 0.30;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -1165,10 +1168,11 @@
         setStatus("Joining in progress…");
         setDebug(`${lastClockSyncDebug} · Seeking to ${formatClockTime(offsetSec)}.`);
 
-        audio.currentTime = offsetSec;
+        const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        audio.currentTime = biasedJoinTarget;
         await waitForSeek();
 
-        const playable = await waitForPlayableAt(offsetSec);
+        const playable = await waitForPlayableAt(biasedJoinTarget);
 
         if(!playable){
           setStatus("Still buffering…");
@@ -1179,7 +1183,8 @@
         offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
 
         if(offsetSec < audio.duration){
-          audio.currentTime = offsetSec;
+          const biasedJoinTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+          audio.currentTime = biasedJoinTarget;
           await waitForSeek();
         }
       }else{
@@ -1189,7 +1194,8 @@
           return false;
         }
 
-        audio.currentTime = offsetSec;
+        const biasedStartTarget = Math.min(offsetSec + START_TARGET_BIAS_SEC, audio.duration - 0.05);
+        audio.currentTime = biasedStartTarget;
         await waitForSeek();
       }
 
@@ -1214,7 +1220,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · +${Math.round(START_TARGET_BIAS_SEC * 1000)} ms start-bias test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
