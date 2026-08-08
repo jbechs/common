@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.9.3</div>
+      <div class="subtitle">v3.9.4</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -252,6 +252,8 @@
     let selfCalibrationAttempted = false;
     let selfCalibrationApplied = false;
     let selfCalibrationMeasuredMs = null;
+    let selfCalibrationSettlingShiftMs = null;
+    let selfCalibrationBiasMs = null;
     let selfCalibrationResultMs = null;
 
     const START_BUFFER_SEC = 15;
@@ -429,9 +431,13 @@
     function calibrationSummary(){
       if(!selfCalibrationAttempted) return "Self-calibration: waiting";
       const measured = selfCalibrationMeasuredMs == null ? "—" : `${selfCalibrationMeasuredMs} ms`;
+      const shift = selfCalibrationSettlingShiftMs == null ? "—" : `${selfCalibrationSettlingShiftMs} ms`;
+      const bias = selfCalibrationBiasMs == null ? "—" : `${selfCalibrationBiasMs} ms`;
       const result = selfCalibrationResultMs == null ? "—" : `${selfCalibrationResultMs} ms`;
-      if(!selfCalibrationApplied) return `Self-calibration: measured ${measured} · no correction`;
-      return `Self-calibration: measured ${measured} · one correction · settled ${result}`;
+      if(!selfCalibrationApplied){
+        return `Self-calibration: measured ${measured} · settling shift ${shift} · no correction`;
+      }
+      return `Self-calibration: measured ${measured} · settling shift ${shift} · predictive bias ${bias} · settled ${result}`;
     }
 
     async function runSelfCalibration(){
@@ -441,19 +447,55 @@
       if(interruptionRecoveryInFlight || interruptionAwaitingTap) return;
 
       selfCalibrationAttempted = true;
+
       const measuredDriftSec = getCurrentDriftSec();
       selfCalibrationMeasuredMs = Math.round(measuredDriftSec * 1000);
 
-      if(Math.abs(measuredDriftSec) < SELF_CALIBRATION_THRESHOLD_SEC ||
-         Math.abs(measuredDriftSec) > SELF_CALIBRATION_MAX_ABS_SEC){
+      // Learn the device/run's own startup settling shift.
+      // Positive shift means playback fell farther behind after "playing".
+      const startOp = latestStartTiming;
+      const driftAtPlayingMs = startOp && startOp.residualAtPlayingSec != null
+        ? Math.round(startOp.residualAtPlayingSec * 1000)
+        : null;
+      const driftAt1sMs = startOp && startOp.settlingSamplesMs
+        ? startOp.settlingSamplesMs[1000]
+        : null;
+
+      if(driftAtPlayingMs != null && driftAt1sMs != null){
+        selfCalibrationSettlingShiftMs = driftAt1sMs - driftAtPlayingMs;
+      }else{
+        selfCalibrationSettlingShiftMs = null;
+      }
+
+      if(Math.abs(measuredDriftSec) < SELF_CALIBRATION_THRESHOLD_SEC){
         updateTimingProbe();
         return;
       }
 
+      if(
+        selfCalibrationSettlingShiftMs == null ||
+        Math.abs(selfCalibrationSettlingShiftMs) > SELF_CALIBRATION_MAX_ABS_SEC * 1000
+      ){
+        updateTimingProbe();
+        return;
+      }
+
+      const predictiveBiasSec = selfCalibrationSettlingShiftMs / 1000;
+      selfCalibrationBiasMs = Math.round(predictiveBiasSec * 1000);
       selfCalibrationApplied = true;
+
       try{
+        // Recompute the canonical target now, then pre-compensate by exactly
+        // the startup settling shift observed on this device/run.
         const expectedNow = getExpectedTrackTimeSec();
-        const target = Math.max(0, Math.min(expectedNow, Math.max(0, audio.duration - 0.05)));
+        const target = Math.max(
+          0,
+          Math.min(
+            expectedNow + predictiveBiasSec,
+            Math.max(0, audio.duration - 0.05)
+          )
+        );
+
         audio.currentTime = target;
         await waitForSeek();
 
@@ -466,6 +508,7 @@
       }catch(err){
         selfCalibrationApplied = false;
       }
+
       updateTimingProbe();
     }
 
@@ -1407,7 +1450,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · self-calibration test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · predictive self-calibration test · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1506,6 +1549,8 @@
       selfCalibrationAttempted = false;
       selfCalibrationApplied = false;
       selfCalibrationMeasuredMs = null;
+      selfCalibrationSettlingShiftMs = null;
+      selfCalibrationBiasMs = null;
       selfCalibrationResultMs = null;
       updateTimingProbe();
 
