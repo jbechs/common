@@ -149,7 +149,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v3.8</div>
+      <div class="subtitle">v3.8 · bounded interruption recovery</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -160,9 +160,9 @@
 
     <div id="countdown" class="countdown"></div>
     <div id="status" class="status">Ready.</div>
+    <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
     <button id="diagnosticsToggle" class="diagnosticsToggle" type="button" aria-expanded="false">info</button>
     <div id="diagnosticsPanel" class="diagnosticsPanel hidden">
-      <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="debug" class="debug"></div>
     </div>
