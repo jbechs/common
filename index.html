@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.8</div>
+      <div class="subtitle">v4.9</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -227,9 +227,8 @@
     let lastRecoveryBiasSec = null;
     let lastRecoveryBiasMode = "—";
     let startupObservationToken = 0;
+    let startupObservationActive = false;
     let startupObservedCorrectionState = "—";
-    let startupLatencyDeltaPredictionSec = null;
-    let startupLatencyDeltaErrorSec = null;
     let startupObservedCorrectionBiasSec = null;
     let startupObservedCorrectionSamplesMs = [];
     let seekSettlingToken = 0;
@@ -330,14 +329,19 @@
     const STARTUP_SETTLING_RECOVERY_WINDOW_MS = 10000;
     const OBSERVED_RECOVERY_MAX_BIAS_SEC = 0.75;
 
-    // v4.8 experiment: test whether the stable main-audio startup plateau is
-    // predicted by (browser outputLatency - warm-transfer pipeline loss).
-    // IMPORTANT: the prediction is DIAGNOSTIC ONLY. We still observe the real
-    // startup plateau and correct from the observed value exactly once, as in
-    // v4.7. This makes headphone vs speaker runs a clean falsifiable test.
-    const STARTUP_OBSERVATION_DELAYS_MS = [500, 750, 1000];
-    const STARTUP_OBSERVATION_MAX_SPREAD_SEC = 0.04;
+    // v4.9: platform-agnostic observed-startup correction.
+    // The v4.9 Android experiment showed that outputLatency is useful as a
+    // diagnostic but does not reliably predict the settled main-audio startup
+    // offset. Instead, let the actual media path establish itself, sample the
+    // settled startup plateau, and correct that observed offset exactly once.
+    //
+    // Samples begin at 1 s because the first ~500 ms can be a moving transition.
+    // While this observation is active, the generic sustained-drift controller
+    // stands down so it cannot race the one-shot startup correction.
+    const STARTUP_OBSERVATION_DELAYS_MS = [1000, 1500, 2000];
+    const STARTUP_OBSERVATION_MAX_SPREAD_SEC = 0.06;
     const STARTUP_OBSERVATION_MIN_BIAS_SEC = 0.08;
+    const POST_SEEK_SETTLING_GRACE_MS = 1500;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -485,13 +489,10 @@
       const passText = startupCalibrationPasses.length
         ? startupCalibrationPasses.map((p, i)=>`pass ${i + 1}: real ${fmtMs(p.realMs)} · media ${fmtMs(p.mediaMs)} · loss ${Math.round(p.lossSec * 1000)} ms`).join("<br>")
         : "passes —";
-      const predictedDeltaMs = outputLatencySupported
-        ? Math.round((outputLatencySec - startupPipelineLossSec) * 1000)
-        : null;
       return `Output latency: ${outputText}<br>` +
         `Warm-transfer calibration:<br>${passText}<br>` +
         `chosen pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms<br>` +
-        `v4.8 predicted startup plateau (output latency − pipeline loss): ${predictedDeltaMs == null ? "—" : `${predictedDeltaMs >= 0 ? "+" : ""}${predictedDeltaMs} ms`} · diagnostic only`;
+        `v4.9 output latency remains diagnostic only; settled startup drift is observed directly`;
     }
 
     function clampLatencySec(value){
@@ -738,7 +739,7 @@
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Recovery bias: ${lastRecoveryBiasSec == null ? "—" : formatSignedMs(lastRecoveryBiasSec)} (${lastRecoveryBiasMode})<br>` +
         `Startup plateau: ${startupObservedCorrectionState}${startupObservedCorrectionBiasSec == null ? "" : ` · bias ${formatSignedMs(startupObservedCorrectionBiasSec)}`}<br>` +
-        `Latency-delta hypothesis: predicted ${startupLatencyDeltaPredictionSec == null ? "—" : formatSignedMs(startupLatencyDeltaPredictionSec)} · observed ${startupObservedCorrectionSamplesMs.length === 3 ? formatSignedMs([...startupObservedCorrectionSamplesMs].sort((a,b)=>a-b)[1] / 1000) : "—"} · error ${startupLatencyDeltaErrorSec == null ? "—" : formatSignedMs(startupLatencyDeltaErrorSec)}<br>` +
+        `Startup samples: ${startupObservedCorrectionSamplesMs.length ? startupObservedCorrectionSamplesMs.join(", ") + " ms" : "—"}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
 
@@ -757,11 +758,10 @@
       lastRecoveryBiasSec = null;
       lastRecoveryBiasMode = "—";
       startupObservationToken += 1;
+      startupObservationActive = false;
       startupObservedCorrectionState = "—";
       startupObservedCorrectionBiasSec = null;
       startupObservedCorrectionSamplesMs = [];
-      startupLatencyDeltaPredictionSec = null;
-      startupLatencyDeltaErrorSec = null;
       seekSettlingToken += 1;
       samplesUnder150 = 0;
       samplesUnder250 = 0;
@@ -1336,7 +1336,7 @@
     }
 
     function getRecoveryMediaTargetSec(expectedSec, preSeekDriftSec){
-      // v4.6/v4.7:
+      // v4.6–v4.9:
       // outputLatency remains diagnostic only. For the FIRST correction within
       // the startup-settling window, use the drift we actually observed as a
       // one-shot empirical lead/lag estimate. Later corrections go straight to
@@ -1364,29 +1364,17 @@
       return expectedSec + recoveryBiasSec;
     }
 
-    function refreshStartupLatencyDeltaPrediction(){
-      // Hypothesis under test: the stable startup lag equals the portion of
-      // reported output latency not already represented by warm-transfer loss.
-      // Never use this value to steer playback in v4.8.
-      if(outputLatencySupported && startupCalibrationMeasured){
-        startupLatencyDeltaPredictionSec = outputLatencySec - startupPipelineLossSec;
-      }else{
-        startupLatencyDeltaPredictionSec = null;
-      }
-      return startupLatencyDeltaPredictionSec;
-    }
-
     function scheduleObservedStartupCorrection(op){
       if(!op || op.kind !== "start" || op.playingEventAtMs == null) return;
 
       const token = ++startupObservationToken;
       const interruptionBaseline = interruptionCount;
       const samples = [];
+      startupObservationActive = true;
       startupObservedCorrectionSamplesMs = [];
       startupObservedCorrectionBiasSec = null;
-      startupLatencyDeltaErrorSec = null;
-      refreshStartupLatencyDeltaPrediction();
-      startupObservedCorrectionState = "observing 0/3";
+      startupObservedCorrectionState = "observing settled startup 0/3";
+      sustainedBadStreak = 0;
       updateDriftStats();
 
       STARTUP_OBSERVATION_DELAYS_MS.forEach((delay, index)=>{
@@ -1394,7 +1382,9 @@
           if(token !== startupObservationToken) return;
 
           if(audio.paused || audio.ended || scheduledAnchorMs == null || interruptionCount !== interruptionBaseline){
+            startupObservationActive = false;
             startupObservedCorrectionState = "aborted";
+            sustainedBadStreak = 0;
             updateDriftStats();
             return;
           }
@@ -1402,10 +1392,16 @@
           const driftSec = getCurrentDriftSec();
           samples.push(driftSec);
           startupObservedCorrectionSamplesMs = samples.map(v=>Math.round(v * 1000));
-          startupObservedCorrectionState = `observing ${samples.length}/3 (${startupObservedCorrectionSamplesMs.join(", ")} ms)`;
+          startupObservedCorrectionState =
+            `observing settled startup ${samples.length}/3 (${startupObservedCorrectionSamplesMs.join(", ")} ms)`;
           updateDriftStats();
 
           if(index !== STARTUP_OBSERVATION_DELAYS_MS.length - 1) return;
+
+          // Observation owns the startup window; release the generic controller
+          // only after we have decided what the startup path actually did.
+          startupObservationActive = false;
+          sustainedBadStreak = 0;
 
           if(hardSeekCount !== 0){
             startupObservedCorrectionState = "skipped — correction already occurred";
@@ -1418,12 +1414,9 @@
           const spreadSec = maxDrift - minDrift;
           const sorted = [...samples].sort((a,b)=>a-b);
           const plateauSec = sorted[Math.floor(sorted.length / 2)];
-          if(Number.isFinite(startupLatencyDeltaPredictionSec)){
-            startupLatencyDeltaErrorSec = plateauSec - startupLatencyDeltaPredictionSec;
-          }
 
           if(spreadSec > STARTUP_OBSERVATION_MAX_SPREAD_SEC){
-            startupObservedCorrectionState = `unstable — spread ${Math.round(spreadSec * 1000)} ms`;
+            startupObservedCorrectionState = `unstable — spread ${Math.round(spreadSec * 1000)} ms; generic controller released`;
             updateDriftStats();
             return;
           }
@@ -1438,12 +1431,12 @@
           startupObservedCorrectionState = `stable ${formatSignedMs(plateauSec)} — correcting once`;
           updateDriftStats();
 
-          // Consume this observation exactly once, regardless of whether the seek
-          // can execute immediately. We never chase a moving startup estimate.
+          // Consume this observation exactly once. We correct the device/run we
+          // actually measured, never a platform label and never outputLatency.
           startupObservationToken += 1;
 
           const corrected = await hardSyncToExpectedTime(
-            `Startup correction from stable observed drift (${Math.round(plateauSec * 1000)} ms)`,
+            `Startup correction from settled observed drift (${Math.round(plateauSec * 1000)} ms)`,
             plateauSec
           );
 
@@ -1476,6 +1469,10 @@
         lastSeekBeforeSec = preSeekDriftSec;
         lastSeekAfterSec = lastDriftSec;
         lastSuccessfulHardSeekAtMs = highResNowMs();
+        // Any successful seek — startup observer or generic controller — owns
+        // the cooldown. This prevents a second controller intervention while
+        // the playback pipeline is still settling from the seek.
+        lastHardSeekAtMs = lastSuccessfulHardSeekAtMs;
         lastSeekAfter1Sec = null;
         lastSeekAfter3Sec = null;
         const thisSeekToken = ++seekSettlingToken;
@@ -1511,6 +1508,34 @@
       recordDriftSample(driftSec);
       updateDriftStats();
 
+      const nowMs = highResNowMs();
+
+      // v4.9: the observer gets exclusive ownership of the first two seconds.
+      // We still record drift for diagnostics, but do not let the generic
+      // controller race the startup measurement.
+      if(startupObservationActive){
+        sustainedBadStreak = 0;
+        setStatus("Playing");
+        updateDriftStats();
+        updateTransport();
+        return;
+      }
+
+      // A seek can make currentTime look wildly wrong for a short interval even
+      // though the audible path is still catching up. Ignore that transient for
+      // intervention purposes, then resume the normal bounded controller.
+      const inPostSeekSettlingGrace =
+        lastSuccessfulHardSeekAtMs != null &&
+        nowMs - lastSuccessfulHardSeekAtMs < POST_SEEK_SETTLING_GRACE_MS;
+
+      if(inPostSeekSettlingGrace){
+        sustainedBadStreak = 0;
+        setStatus("Playing");
+        updateDriftStats();
+        updateTransport();
+        return;
+      }
+
       const absDriftSec = Math.abs(driftSec);
       if(absDriftSec >= HARD_SEEK_TRIGGER_SEC){
         sustainedBadStreak += 1;
@@ -1519,7 +1544,6 @@
       }
       updateDriftStats();
 
-      const nowMs = highResNowMs();
       const cooldownElapsed = nowMs - lastHardSeekAtMs >= HARD_SEEK_COOLDOWN_MS;
       const sustainedBadState = sustainedBadStreak >= HARD_SEEK_REQUIRED_CHECKS;
       const correctionLimitReached = hardSeekCount >= HARD_SEEK_MAX_COUNT;
@@ -1842,7 +1866,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.8 tests output-latency minus warm-transfer loss against observed startup plateau; prediction diagnostic only; observed plateau corrects once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.9 observes settled startup drift at 1.0/1.5/2.0 s and corrects a stable plateau once; no platform sniffing; generic controller stands down during observation and post-seek settling · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
