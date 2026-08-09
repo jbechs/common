@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.4.1</div>
+      <div class="subtitle">v4.3.2</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -257,6 +257,12 @@
     let preparationAttemptStartedAtMs = null;
     let currentPreparationStage = null;
     let lastPreparationOutcome = null;
+
+    // v4.3.2: Safari/iOS can require AudioContext.resume() to be INVOKED
+    // synchronously inside a trusted user gesture. We therefore launch the
+    // output-path probe at the very beginning of the audience's Begin tap,
+    // before clock/metadata awaits can consume user activation.
+    let gestureOutputProbePromise = null;
 
     let startupCalibrationBiasSec = 0;
     let startupCalibrationMeasured = false;
@@ -1744,6 +1750,19 @@
         return;
       }
 
+      // CRITICAL v4.3.2 experiment: on a real audience tap, invoke the Web Audio
+      // output probe NOW, while this call stack still owns trusted user activation.
+      // Do not await it yet; simply starting resume() here is the important part.
+      // Automatic retry reuses the already-started probe/context instead of
+      // pretending it has a fresh user gesture.
+      if(!isAutomaticRetry){
+        try{
+          gestureOutputProbePromise = prepareOutputLatencyProbe();
+        }catch(err){
+          gestureOutputProbePromise = Promise.resolve(false);
+        }
+      }
+
       playButton.disabled = true;
       playButton.textContent = "Preparing…";
 
@@ -1760,9 +1779,12 @@
 
         // This stays feature-detected. Unsupported/older browsers simply fall
         // back to the pre-curtain behavioral calibration already used by v4.
+        // On attempt 1, the promise was deliberately STARTED synchronously in
+        // the Begin gesture above. We await it only now, after clock/metadata work.
         setPreparationStage("Checking audio output…");
         const outputProbeTimeoutMs = preparationAttemptCount > 1 ? 10000 : 5000;
-        await withTimeout(prepareOutputLatencyProbe(), outputProbeTimeoutMs, "Output latency probe timeout");
+        const outputProbePromise = gestureOutputProbePromise || prepareOutputLatencyProbe();
+        await withTimeout(outputProbePromise, outputProbeTimeoutMs, "Output latency probe timeout");
 
         setPreparationStage("Priming audio…");
         await primeAudioElement();
@@ -1770,7 +1792,7 @@
         setPreparationStage("Calibrating playback…");
         await withTimeout(calibrateStartupBias(), 20000, "Playback calibration timeout");
         const preparationElapsedMs = Math.round(highResNowMs() - preparationAttemptStartedAtMs);
-        lastPreparationOutcome = `success${preparationAttemptCount > 1 ? ` on retry ${preparationAttemptCount}` : ""} · ${preparationElapsedMs} ms`;
+        lastPreparationOutcome = `success${preparationAttemptCount > 1 ? ` on retry ${preparationAttemptCount}` : ""} · gesture-bound output probe · ${preparationElapsedMs} ms`;
         updateTimingProbe();
         clearPreparationStatusTimer();
 
