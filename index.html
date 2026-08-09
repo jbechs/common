@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.3</div>
+      <div class="subtitle">v4.4</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -263,6 +263,7 @@
     let startupCalibrationRealElapsedMs = null;
     let startupCalibrationMediaElapsedMs = null;
     let startupPipelineLossSec = 0;
+    let startupCalibrationPasses = [];
 
     // Output-path awareness. We do not identify AirPods/Bluetooth/etc. by name.
     // When the browser exposes Web Audio outputLatency, we use that estimate
@@ -438,8 +439,12 @@
 
       const pipelineLossMs = Math.round(startupPipelineLossSec * 1000);
       const biasMs = Math.round(startupCalibrationBiasSec * 1000);
+      const passText = startupCalibrationPasses.length
+        ? startupCalibrationPasses.map((p, i)=>`pass ${i + 1}: real ${fmtMs(p.realMs)} · media ${fmtMs(p.mediaMs)} · loss ${Math.round(p.lossSec * 1000)} ms`).join("<br>")
+        : "passes —";
       return `Output latency: ${outputText}<br>` +
-        `Pre-curtain calibration: real ${fmtMs(startupCalibrationRealElapsedMs)} · media ${fmtMs(startupCalibrationMediaElapsedMs)} · pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms`;
+        `Warm-transfer calibration:<br>${passText}<br>` +
+        `chosen pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms`;
     }
 
     function clampLatencySec(value){
@@ -997,7 +1002,7 @@
       startupCalibrationRealElapsedMs = null;
       startupCalibrationMediaElapsedMs = null;
       startupPipelineLossSec = 0;
-      startupPipelineLossSec = 0;
+      startupCalibrationPasses = [];
       refreshOutputLatencyEstimate();
       updateTimingProbe();
 
@@ -1014,44 +1019,58 @@
             ? 1.0
             : 0;
 
-        audio.currentTime = calibrationStartSec;
-        await waitForSeek();
+        // v4.3 experiment: use one pass to warm/prime the selected output path,
+        // then repeat the exact start sequence and transfer the SECOND pass's
+        // measured loss to the real curtain start. This avoids assuming that
+        // a cold-start loss is identical to the already-warmed performance start.
+        // outputLatency remains diagnostic; it is not added or maxed into the
+        // start bias because it may overlap the media-side calibration signal.
+        for(let passIndex = 0; passIndex < 2; passIndex++){
+          audio.pause();
+          audio.currentTime = calibrationStartSec;
+          await waitForSeek();
 
-        const playingPromise = waitForPlayingEvent();
-        await audio.play();
-        const didPlay = await playingPromise;
+          const playingPromise = waitForPlayingEvent();
+          await audio.play();
+          const didPlay = await playingPromise;
 
-        if(!didPlay || audio.paused){
-          throw new Error("Calibration playback did not establish");
+          if(!didPlay || audio.paused){
+            throw new Error(`Calibration pass ${passIndex + 1} did not establish`);
+          }
+
+          const realStartMs = highResNowMs();
+          const mediaStartSec = audio.currentTime;
+
+          await new Promise(resolve=>setTimeout(resolve, START_CALIBRATION_SAMPLE_MS));
+
+          const realEndMs = highResNowMs();
+          const mediaEndSec = audio.currentTime;
+
+          const realElapsedSec = Math.max(0, (realEndMs - realStartMs) / 1000);
+          const mediaElapsedSec = Math.max(0, mediaEndSec - mediaStartSec);
+          const measuredLossSec = Math.max(0, realElapsedSec - mediaElapsedSec);
+
+          startupCalibrationPasses.push({
+            realMs: Math.round(realElapsedSec * 1000),
+            mediaMs: Math.round(mediaElapsedSec * 1000),
+            lossSec: measuredLossSec
+          });
+
+          audio.pause();
+          // Briefly yield so the second pass is a distinct start, while keeping
+          // the output route warm.
+          await new Promise(resolve=>setTimeout(resolve, 80));
         }
 
-        // Start measuring only once the browser declares the media "playing".
-        // The quantity we want is how much less media time advances than real
-        // high-resolution time during the settling window.
-        const realStartMs = highResNowMs();
-        const mediaStartSec = audio.currentTime;
+        const chosen = startupCalibrationPasses[startupCalibrationPasses.length - 1];
+        startupCalibrationRealElapsedMs = chosen.realMs;
+        startupCalibrationMediaElapsedMs = chosen.mediaMs;
+        startupPipelineLossSec = chosen.lossSec;
 
-        await new Promise(resolve=>setTimeout(resolve, START_CALIBRATION_SAMPLE_MS));
-
-        const realEndMs = highResNowMs();
-        const mediaEndSec = audio.currentTime;
-
-        const realElapsedSec = Math.max(0, (realEndMs - realStartMs) / 1000);
-        const mediaElapsedSec = Math.max(0, mediaEndSec - mediaStartSec);
-        const measuredLossSec = realElapsedSec - mediaElapsedSec;
-
-        startupCalibrationRealElapsedMs = Math.round(realElapsedSec * 1000);
-        startupCalibrationMediaElapsedMs = Math.round(mediaElapsedSec * 1000);
-        startupPipelineLossSec = Math.max(0, measuredLossSec);
-
-        // The two measurements can describe overlapping portions of the same
-        // playback pipeline, especially with wireless outputs. Do NOT add them
-        // blindly. Use the larger observed delay as the conservative start lead.
         refreshOutputLatencyEstimate();
-        const learnedStartLeadSec = Math.max(startupPipelineLossSec, outputLatencySec);
         startupCalibrationBiasSec = Math.max(
           0,
-          Math.min(START_CALIBRATION_MAX_BIAS_SEC, learnedStartLeadSec)
+          Math.min(START_CALIBRATION_MAX_BIAS_SEC, startupPipelineLossSec)
         );
         startupCalibrationMeasured = true;
 
@@ -1074,6 +1093,7 @@
         startupCalibrationBiasSec = 0;
         startupCalibrationMeasured = false;
         startupPipelineLossSec = 0;
+        startupCalibrationPasses = [];
         updateTimingProbe();
         return false;
       }
@@ -1598,7 +1618,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · drift excludes output latency after compensation · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1702,6 +1722,7 @@
       startupCalibrationRealElapsedMs = null;
       startupCalibrationMediaElapsedMs = null;
       startupPipelineLossSec = 0;
+      startupCalibrationPasses = [];
       updateTimingProbe();
 
       setDebug("");
