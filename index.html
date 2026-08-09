@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.2.1</div>
+      <div class="subtitle">v4.2.2 · preparation diagnostics</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -253,6 +253,10 @@
     // especially on iOS where media play() can remain pending on weak networks.
     let preparationStatusTimer = null;
     let preparationStageStartedAtMs = null;
+    let preparationAttemptCount = 0;
+    let preparationAttemptStartedAtMs = null;
+    let currentPreparationStage = null;
+    let lastPreparationOutcome = null;
 
     let startupCalibrationBiasSec = 0;
     let startupCalibrationMeasured = false;
@@ -490,7 +494,12 @@
         ? `Pending ${pendingTimingOperation.kind} timing…`
         : "No timing operation pending";
 
+      const preparationText = lastPreparationOutcome
+        ? `Preparation: ${lastPreparationOutcome}`
+        : `Preparation: —`;
+
       timingProbeEl.innerHTML =
+        `${preparationText}<br>` +
         `${calibrationProbeSummary()}<br>` +
         `${timingSummary("Start", latestStartTiming)}<br>` +
         `${timingSummary("Recovery", latestRecoveryTiming)}<br>` +
@@ -771,6 +780,7 @@
 
     function setPreparationStage(label){
       clearPreparationStatusTimer();
+      currentPreparationStage = label.replace(/…$/, "");
       preparationStageStartedAtMs = highResNowMs();
       setStatus(label);
 
@@ -1665,6 +1675,9 @@
 
     async function handlePrepare(){
       clearPreparationStatusTimer();
+      preparationAttemptCount += 1;
+      preparationAttemptStartedAtMs = highResNowMs();
+      currentPreparationStage = "starting";
       clearTimers();
       clearPlaybackMonitors();
       clearCrossfade();
@@ -1727,6 +1740,9 @@
 
         setPreparationStage("Calibrating playback…");
         await withTimeout(calibrateStartupBias(), 20000, "Playback calibration timeout");
+        const preparationElapsedMs = Math.round(highResNowMs() - preparationAttemptStartedAtMs);
+        lastPreparationOutcome = `success${preparationAttemptCount > 1 ? ` on retry ${preparationAttemptCount}` : ""} · ${preparationElapsedMs} ms`;
+        updateTimingProbe();
         clearPreparationStatusTimer();
 
         const startTimeMs = new Date(startInput.value).getTime();
@@ -1747,10 +1763,14 @@
           setDebug(`${lastClockSyncDebug} · Start time is already in the past; Begin will jump to the correct offset.`);
         }
       }catch(err){
+        const preparationElapsedMs = preparationAttemptStartedAtMs == null ? null : Math.round(highResNowMs() - preparationAttemptStartedAtMs);
+        const failedStage = currentPreparationStage || "unknown stage";
+        lastPreparationOutcome = `failed at ${failedStage}${preparationElapsedMs == null ? "" : ` after ${preparationElapsedMs} ms`} · attempt ${preparationAttemptCount}`;
+        updateTimingProbe();
         clearPreparationStatusTimer();
         stopPreshowImmediately();
         setStatus("Preparation failed — tap Begin to retry");
-        setDebug(`Preparation failed: ${err.message}`);
+        setDebug(`Preparation failed at ${failedStage}: ${err.message}`);
       }finally{
         clearPreparationStatusTimer();
         if(!startAttempted){
