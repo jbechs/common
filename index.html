@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.2</div>
+      <div class="subtitle">v4.2.1 · iOS loading hardened</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -248,6 +248,11 @@
     let pendingTimingOperation = null;
     let latestStartTiming = null;
     let latestRecoveryTiming = null;
+
+    // Preparation watchdog/diagnostics. Keep loading failures bounded and visible,
+    // especially on iOS where media play() can remain pending on weak networks.
+    let preparationStatusTimer = null;
+    let preparationStageStartedAtMs = null;
 
     let startupCalibrationBiasSec = 0;
     let startupCalibrationMeasured = false;
@@ -756,6 +761,37 @@
       return false;
     }
 
+    function clearPreparationStatusTimer(){
+      if(preparationStatusTimer){
+        clearInterval(preparationStatusTimer);
+        preparationStatusTimer = null;
+      }
+      preparationStageStartedAtMs = null;
+    }
+
+    function setPreparationStage(label){
+      clearPreparationStatusTimer();
+      preparationStageStartedAtMs = highResNowMs();
+      setStatus(label);
+
+      preparationStatusTimer = setInterval(()=>{
+        if(preparationStageStartedAtMs == null) return;
+        const elapsedSec = Math.floor((highResNowMs() - preparationStageStartedAtMs) / 1000);
+        setStatus(`${label} ${elapsedSec}s`);
+      }, 1000);
+    }
+
+    function withTimeout(promise, timeoutMs, message){
+      let timeoutId = null;
+      const timeoutPromise = new Promise((_, reject)=>{
+        timeoutId = setTimeout(()=>reject(new Error(message)), timeoutMs);
+      });
+
+      return Promise.race([promise, timeoutPromise]).finally(()=>{
+        if(timeoutId) clearTimeout(timeoutId);
+      });
+    }
+
     async function ensureMetadata(timeoutMs = 30000){
       assignSourceIfNeeded();
 
@@ -787,7 +823,8 @@
 
         audio.addEventListener("loadedmetadata", onLoaded);
         audio.addEventListener("error", onError);
-        audio.load();
+        // Do not call load() again here. startDownload() owns the one explicit
+        // main-track load request; restarting it can disturb slow iOS media loads.
       });
     }
 
@@ -903,18 +940,19 @@
         assignSourceIfNeeded();
 
         audio.muted = true;
-        await audio.play();
+        await withTimeout(audio.play(), 12000, "Audio priming timeout");
 
         audio.pause();
         audio.currentTime = 0;
         audio.muted = false;
 
-        await waitForSeek();
+        await withTimeout(waitForSeek(), 5000, "Audio reset seek timeout");
 
         return true;
       }catch(err){
+        audio.pause();
         audio.muted = false;
-        return false;
+        throw err;
       }
     }
 
@@ -1626,6 +1664,7 @@
     }
 
     async function handlePrepare(){
+      clearPreparationStatusTimer();
       clearTimers();
       clearPlaybackMonitors();
       clearCrossfade();
@@ -1665,26 +1704,30 @@
       }
 
       playButton.disabled = true;
+      playButton.textContent = "Preparing…";
 
       try{
         hidePlayer();
         startDownload();
-        setStatus("Syncing clock…");
+        setPreparationStage("Syncing clock…");
 
         await syncServerClock();
 
-        setStatus("Downloading…");
-
+        setPreparationStage("Downloading metadata…");
         await ensureMetadata();
         updateTransport();
 
         // This stays feature-detected. Unsupported/older browsers simply fall
         // back to the pre-curtain behavioral calibration already used by v4.
-        await prepareOutputLatencyProbe();
+        setPreparationStage("Checking audio output…");
+        await withTimeout(prepareOutputLatencyProbe(), 5000, "Output latency probe timeout");
+
+        setPreparationStage("Priming audio…");
         await primeAudioElement();
 
-        setStatus("Calibrating playback…");
-        await calibrateStartupBias();
+        setPreparationStage("Calibrating playback…");
+        await withTimeout(calibrateStartupBias(), 20000, "Playback calibration timeout");
+        clearPreparationStatusTimer();
 
         const startTimeMs = new Date(startInput.value).getTime();
         const offsetSec = (syncedNowMs() - startTimeMs) / 1000;
@@ -1704,12 +1747,15 @@
           setDebug(`${lastClockSyncDebug} · Start time is already in the past; Begin will jump to the correct offset.`);
         }
       }catch(err){
+        clearPreparationStatusTimer();
         stopPreshowImmediately();
-        setStatus("Audio source did not load");
-        setDebug(`Load failed: ${err.message}`);
+        setStatus("Preparation failed — tap Begin to retry");
+        setDebug(`Preparation failed: ${err.message}`);
       }finally{
+        clearPreparationStatusTimer();
         if(!startAttempted){
           playButton.disabled = false;
+          playButton.textContent = "Begin";
         }
       }
     }
@@ -1889,3 +1935,4 @@
   </script>
 </body>
 </html>
+
