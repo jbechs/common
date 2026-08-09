@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.4</div>
+      <div class="subtitle">v4.4.1</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -1693,7 +1693,14 @@
       }, Math.max(0, startTimeMs - syncedNowMs()));
     }
 
-    async function handlePrepare(){
+    async function handlePrepare(isAutomaticRetry = false){
+      // A fresh audience/user Begin starts a new preparation cycle.
+      // An internal retry preserves the attempt count so we retry only once.
+      if(!isAutomaticRetry){
+        preparationAttemptCount = 0;
+      }
+
+      let delegatedRetry = false;
       clearPreparationStatusTimer();
       preparationAttemptCount += 1;
       preparationAttemptStartedAtMs = highResNowMs();
@@ -1754,7 +1761,8 @@
         // This stays feature-detected. Unsupported/older browsers simply fall
         // back to the pre-curtain behavioral calibration already used by v4.
         setPreparationStage("Checking audio output…");
-        await withTimeout(prepareOutputLatencyProbe(), 5000, "Output latency probe timeout");
+        const outputProbeTimeoutMs = preparationAttemptCount > 1 ? 10000 : 5000;
+        await withTimeout(prepareOutputLatencyProbe(), outputProbeTimeoutMs, "Output latency probe timeout");
 
         setPreparationStage("Priming audio…");
         await primeAudioElement();
@@ -1790,11 +1798,24 @@
         updateTimingProbe();
         clearPreparationStatusTimer();
         stopPreshowImmediately();
+
+        // iOS/Safari can occasionally leave the media/output path half-awake on
+        // the first preparation pass. Treat one failure as a warm-up event, not
+        // an audience-facing failure. Retry the complete preparation once after
+        // a short settling interval; attempt 2 also gets a longer output probe.
+        if(preparationAttemptCount < 2){
+          delegatedRetry = true;
+          setStatus("Preparing…");
+          setDebug(`Preparation attempt 1 stalled at ${failedStage}: ${err.message} · retrying automatically…`);
+          await new Promise(resolve=>setTimeout(resolve, 400));
+          return await handlePrepare(true);
+        }
+
         setStatus("Preparation failed — tap Begin to retry");
         setDebug(`Preparation failed at ${failedStage}: ${err.message}`);
       }finally{
         clearPreparationStatusTimer();
-        if(!startAttempted){
+        if(!delegatedRetry && !startAttempted){
           playButton.disabled = false;
           playButton.textContent = "Begin";
         }
@@ -1830,7 +1851,7 @@
       diagnosticsToggle.textContent = "info";
     });
 
-    playButton.addEventListener("click", handlePrepare);
+    playButton.addEventListener("click", ()=>handlePrepare(false));
     startNowButton.addEventListener("click", ()=>{
       if(startNowMode === "resume"){
         handleResumeTap();
