@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.7</div>
+      <div class="subtitle">v4.8</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -228,6 +228,8 @@
     let lastRecoveryBiasMode = "—";
     let startupObservationToken = 0;
     let startupObservedCorrectionState = "—";
+    let startupLatencyDeltaPredictionSec = null;
+    let startupLatencyDeltaErrorSec = null;
     let startupObservedCorrectionBiasSec = null;
     let startupObservedCorrectionSamplesMs = [];
     let seekSettlingToken = 0;
@@ -328,10 +330,11 @@
     const STARTUP_SETTLING_RECOVERY_WINDOW_MS = 10000;
     const OBSERVED_RECOVERY_MAX_BIAS_SEC = 0.75;
 
-    // v4.7 experiment: observe the REAL main-audio startup after it has had time
-    // to settle. If three samples form a stable plateau, correct that empirical
-    // offset exactly once. This deliberately ignores browser-reported
-    // outputLatency and remains platform/output-path agnostic.
+    // v4.8 experiment: test whether the stable main-audio startup plateau is
+    // predicted by (browser outputLatency - warm-transfer pipeline loss).
+    // IMPORTANT: the prediction is DIAGNOSTIC ONLY. We still observe the real
+    // startup plateau and correct from the observed value exactly once, as in
+    // v4.7. This makes headphone vs speaker runs a clean falsifiable test.
     const STARTUP_OBSERVATION_DELAYS_MS = [500, 750, 1000];
     const STARTUP_OBSERVATION_MAX_SPREAD_SEC = 0.04;
     const STARTUP_OBSERVATION_MIN_BIAS_SEC = 0.08;
@@ -482,9 +485,13 @@
       const passText = startupCalibrationPasses.length
         ? startupCalibrationPasses.map((p, i)=>`pass ${i + 1}: real ${fmtMs(p.realMs)} · media ${fmtMs(p.mediaMs)} · loss ${Math.round(p.lossSec * 1000)} ms`).join("<br>")
         : "passes —";
+      const predictedDeltaMs = outputLatencySupported
+        ? Math.round((outputLatencySec - startupPipelineLossSec) * 1000)
+        : null;
       return `Output latency: ${outputText}<br>` +
         `Warm-transfer calibration:<br>${passText}<br>` +
-        `chosen pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms`;
+        `chosen pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms<br>` +
+        `v4.8 predicted startup plateau (output latency − pipeline loss): ${predictedDeltaMs == null ? "—" : `${predictedDeltaMs >= 0 ? "+" : ""}${predictedDeltaMs} ms`} · diagnostic only`;
     }
 
     function clampLatencySec(value){
@@ -731,6 +738,7 @@
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Recovery bias: ${lastRecoveryBiasSec == null ? "—" : formatSignedMs(lastRecoveryBiasSec)} (${lastRecoveryBiasMode})<br>` +
         `Startup plateau: ${startupObservedCorrectionState}${startupObservedCorrectionBiasSec == null ? "" : ` · bias ${formatSignedMs(startupObservedCorrectionBiasSec)}`}<br>` +
+        `Latency-delta hypothesis: predicted ${startupLatencyDeltaPredictionSec == null ? "—" : formatSignedMs(startupLatencyDeltaPredictionSec)} · observed ${startupObservedCorrectionSamplesMs.length === 3 ? formatSignedMs([...startupObservedCorrectionSamplesMs].sort((a,b)=>a-b)[1] / 1000) : "—"} · error ${startupLatencyDeltaErrorSec == null ? "—" : formatSignedMs(startupLatencyDeltaErrorSec)}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
 
@@ -752,6 +760,8 @@
       startupObservedCorrectionState = "—";
       startupObservedCorrectionBiasSec = null;
       startupObservedCorrectionSamplesMs = [];
+      startupLatencyDeltaPredictionSec = null;
+      startupLatencyDeltaErrorSec = null;
       seekSettlingToken += 1;
       samplesUnder150 = 0;
       samplesUnder250 = 0;
@@ -1354,6 +1364,18 @@
       return expectedSec + recoveryBiasSec;
     }
 
+    function refreshStartupLatencyDeltaPrediction(){
+      // Hypothesis under test: the stable startup lag equals the portion of
+      // reported output latency not already represented by warm-transfer loss.
+      // Never use this value to steer playback in v4.8.
+      if(outputLatencySupported && startupCalibrationMeasured){
+        startupLatencyDeltaPredictionSec = outputLatencySec - startupPipelineLossSec;
+      }else{
+        startupLatencyDeltaPredictionSec = null;
+      }
+      return startupLatencyDeltaPredictionSec;
+    }
+
     function scheduleObservedStartupCorrection(op){
       if(!op || op.kind !== "start" || op.playingEventAtMs == null) return;
 
@@ -1362,6 +1384,8 @@
       const samples = [];
       startupObservedCorrectionSamplesMs = [];
       startupObservedCorrectionBiasSec = null;
+      startupLatencyDeltaErrorSec = null;
+      refreshStartupLatencyDeltaPrediction();
       startupObservedCorrectionState = "observing 0/3";
       updateDriftStats();
 
@@ -1394,6 +1418,9 @@
           const spreadSec = maxDrift - minDrift;
           const sorted = [...samples].sort((a,b)=>a-b);
           const plateauSec = sorted[Math.floor(sorted.length / 2)];
+          if(Number.isFinite(startupLatencyDeltaPredictionSec)){
+            startupLatencyDeltaErrorSec = plateauSec - startupLatencyDeltaPredictionSec;
+          }
 
           if(spreadSec > STARTUP_OBSERVATION_MAX_SPREAD_SEC){
             startupObservedCorrectionState = `unstable — spread ${Math.round(spreadSec * 1000)} ms`;
@@ -1815,7 +1842,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.7 observes stable startup drift and corrects once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.8 tests output-latency minus warm-transfer loss against observed startup plateau; prediction diagnostic only; observed plateau corrects once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
