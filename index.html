@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.6</div>
+      <div class="subtitle">v4.7</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -226,6 +226,10 @@
     let lastSeekAfter3Sec = null;
     let lastRecoveryBiasSec = null;
     let lastRecoveryBiasMode = "—";
+    let startupObservationToken = 0;
+    let startupObservedCorrectionState = "—";
+    let startupObservedCorrectionBiasSec = null;
+    let startupObservedCorrectionSamplesMs = [];
     let seekSettlingToken = 0;
     let samplesUnder150 = 0;
     let samplesUnder250 = 0;
@@ -316,13 +320,21 @@
     const START_TARGET_STALE_SEC = 0.25;
     const START_RETARGET_MAX_COUNT = 2;
 
-    // v4.6 experiment: if the first sustained bad state appears immediately
+    // v4.6 foundation: if the first sustained bad state appears immediately
     // after startup, treat the observed drift itself as an empirical estimate
     // of the newly-established playback-path lag. Use that measured lag once
     // as the recovery seek bias, rather than the browser's outputLatency.
     // This stays platform-agnostic and bounded.
     const STARTUP_SETTLING_RECOVERY_WINDOW_MS = 10000;
     const OBSERVED_RECOVERY_MAX_BIAS_SEC = 0.75;
+
+    // v4.7 experiment: observe the REAL main-audio startup after it has had time
+    // to settle. If three samples form a stable plateau, correct that empirical
+    // offset exactly once. This deliberately ignores browser-reported
+    // outputLatency and remains platform/output-path agnostic.
+    const STARTUP_OBSERVATION_DELAYS_MS = [500, 750, 1000];
+    const STARTUP_OBSERVATION_MAX_SPREAD_SEC = 0.04;
+    const STARTUP_OBSERVATION_MIN_BIAS_SEC = 0.08;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -718,6 +730,7 @@
         `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
         `Recovery bias: ${lastRecoveryBiasSec == null ? "—" : formatSignedMs(lastRecoveryBiasSec)} (${lastRecoveryBiasMode})<br>` +
+        `Startup plateau: ${startupObservedCorrectionState}${startupObservedCorrectionBiasSec == null ? "" : ` · bias ${formatSignedMs(startupObservedCorrectionBiasSec)}`}<br>` +
         `Post-seek settling: ${settlingText}`;
     }
 
@@ -735,6 +748,10 @@
       lastSeekAfter3Sec = null;
       lastRecoveryBiasSec = null;
       lastRecoveryBiasMode = "—";
+      startupObservationToken += 1;
+      startupObservedCorrectionState = "—";
+      startupObservedCorrectionBiasSec = null;
+      startupObservedCorrectionSamplesMs = [];
       seekSettlingToken += 1;
       samplesUnder150 = 0;
       samplesUnder250 = 0;
@@ -1309,7 +1326,7 @@
     }
 
     function getRecoveryMediaTargetSec(expectedSec, preSeekDriftSec){
-      // v4.6:
+      // v4.6/v4.7:
       // outputLatency remains diagnostic only. For the FIRST correction within
       // the startup-settling window, use the drift we actually observed as a
       // one-shot empirical lead/lag estimate. Later corrections go straight to
@@ -1335,6 +1352,80 @@
         : "canonical target";
 
       return expectedSec + recoveryBiasSec;
+    }
+
+    function scheduleObservedStartupCorrection(op){
+      if(!op || op.kind !== "start" || op.playingEventAtMs == null) return;
+
+      const token = ++startupObservationToken;
+      const interruptionBaseline = interruptionCount;
+      const samples = [];
+      startupObservedCorrectionSamplesMs = [];
+      startupObservedCorrectionBiasSec = null;
+      startupObservedCorrectionState = "observing 0/3";
+      updateDriftStats();
+
+      STARTUP_OBSERVATION_DELAYS_MS.forEach((delay, index)=>{
+        setTimeout(async ()=>{
+          if(token !== startupObservationToken) return;
+
+          if(audio.paused || audio.ended || scheduledAnchorMs == null || interruptionCount !== interruptionBaseline){
+            startupObservedCorrectionState = "aborted";
+            updateDriftStats();
+            return;
+          }
+
+          const driftSec = getCurrentDriftSec();
+          samples.push(driftSec);
+          startupObservedCorrectionSamplesMs = samples.map(v=>Math.round(v * 1000));
+          startupObservedCorrectionState = `observing ${samples.length}/3 (${startupObservedCorrectionSamplesMs.join(", ")} ms)`;
+          updateDriftStats();
+
+          if(index !== STARTUP_OBSERVATION_DELAYS_MS.length - 1) return;
+
+          if(hardSeekCount !== 0){
+            startupObservedCorrectionState = "skipped — correction already occurred";
+            updateDriftStats();
+            return;
+          }
+
+          const minDrift = Math.min(...samples);
+          const maxDrift = Math.max(...samples);
+          const spreadSec = maxDrift - minDrift;
+          const sorted = [...samples].sort((a,b)=>a-b);
+          const plateauSec = sorted[Math.floor(sorted.length / 2)];
+
+          if(spreadSec > STARTUP_OBSERVATION_MAX_SPREAD_SEC){
+            startupObservedCorrectionState = `unstable — spread ${Math.round(spreadSec * 1000)} ms`;
+            updateDriftStats();
+            return;
+          }
+
+          if(Math.abs(plateauSec) < STARTUP_OBSERVATION_MIN_BIAS_SEC){
+            startupObservedCorrectionState = `stable ${formatSignedMs(plateauSec)} — no correction needed`;
+            updateDriftStats();
+            return;
+          }
+
+          startupObservedCorrectionBiasSec = clampObservedRecoveryBiasSec(plateauSec);
+          startupObservedCorrectionState = `stable ${formatSignedMs(plateauSec)} — correcting once`;
+          updateDriftStats();
+
+          // Consume this observation exactly once, regardless of whether the seek
+          // can execute immediately. We never chase a moving startup estimate.
+          startupObservationToken += 1;
+
+          const corrected = await hardSyncToExpectedTime(
+            `Startup correction from stable observed drift (${Math.round(plateauSec * 1000)} ms)`,
+            plateauSec
+          );
+
+          startupObservedCorrectionState = corrected
+            ? `corrected once from ${formatSignedMs(plateauSec)}`
+            : `stable ${formatSignedMs(plateauSec)} — correction deferred`;
+          updateDriftStats();
+        }, delay);
+      });
     }
 
     async function hardSyncToExpectedTime(reason, preSeekDriftSec){
@@ -1724,7 +1815,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.6 recovery can use observed startup drift once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.7 observes stable startup drift and corrects once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -2040,6 +2131,7 @@
         op.playingEventAtMs = highResNowMs();
         op.residualAtPlayingSec = getCurrentDriftSec();
         scheduleSettlingSamples(op);
+        if(op.kind === "start") scheduleObservedStartupCorrection(op);
         finishTimingOperation(op);
       }
 
