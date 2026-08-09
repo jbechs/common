@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.5</div>
+      <div class="subtitle">v4.6</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -224,6 +224,8 @@
     let lastSuccessfulHardSeekAtMs = null;
     let lastSeekAfter1Sec = null;
     let lastSeekAfter3Sec = null;
+    let lastRecoveryBiasSec = null;
+    let lastRecoveryBiasMode = "—";
     let seekSettlingToken = 0;
     let samplesUnder150 = 0;
     let samplesUnder250 = 0;
@@ -313,6 +315,14 @@
     // Keep this bounded so a pathological browser can never trap us in a seek loop.
     const START_TARGET_STALE_SEC = 0.25;
     const START_RETARGET_MAX_COUNT = 2;
+
+    // v4.6 experiment: if the first sustained bad state appears immediately
+    // after startup, treat the observed drift itself as an empirical estimate
+    // of the newly-established playback-path lag. Use that measured lag once
+    // as the recovery seek bias, rather than the browser's outputLatency.
+    // This stays platform-agnostic and bounded.
+    const STARTUP_SETTLING_RECOVERY_WINDOW_MS = 10000;
+    const OBSERVED_RECOVERY_MAX_BIAS_SEC = 0.75;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -707,6 +717,7 @@
         `Interruptions ${interruptionCount} · recovered ${interruptionAutoRecoveries + interruptionManualRecoveries} (${interruptionAutoRecoveries} auto · ${interruptionManualRecoveries} tap)<br>` +
         `${getNetworkResilienceText()} · Network ${navigator.onLine ? "online" : "offline"}<br>` +
         `Improvement ${improvementText} · Last ${lastSeekText}<br>` +
+        `Recovery bias: ${lastRecoveryBiasSec == null ? "—" : formatSignedMs(lastRecoveryBiasSec)} (${lastRecoveryBiasMode})<br>` +
         `Post-seek settling: ${settlingText}`;
     }
 
@@ -722,6 +733,8 @@
       lastSuccessfulHardSeekAtMs = null;
       lastSeekAfter1Sec = null;
       lastSeekAfter3Sec = null;
+      lastRecoveryBiasSec = null;
+      lastRecoveryBiasMode = "—";
       seekSettlingToken += 1;
       samplesUnder150 = 0;
       samplesUnder250 = 0;
@@ -1287,9 +1300,41 @@
       return expected - audio.currentTime;
     }
 
-    function getCompensatedMediaTargetSec(expectedSec){
-      refreshOutputLatencyEstimate();
-      return expectedSec + outputLatencySec;
+    function clampObservedRecoveryBiasSec(value){
+      if(!Number.isFinite(value)) return 0;
+      return Math.max(
+        -OBSERVED_RECOVERY_MAX_BIAS_SEC,
+        Math.min(OBSERVED_RECOVERY_MAX_BIAS_SEC, value)
+      );
+    }
+
+    function getRecoveryMediaTargetSec(expectedSec, preSeekDriftSec){
+      // v4.6:
+      // outputLatency remains diagnostic only. For the FIRST correction within
+      // the startup-settling window, use the drift we actually observed as a
+      // one-shot empirical lead/lag estimate. Later corrections go straight to
+      // the canonical media position and let the existing bounded controller
+      // decide whether another intervention is warranted.
+      const msSincePlaying =
+        latestStartTiming && latestStartTiming.playingEventAtMs != null
+          ? highResNowMs() - latestStartTiming.playingEventAtMs
+          : Infinity;
+
+      const useObservedStartupBias =
+        hardSeekCount === 0 &&
+        msSincePlaying <= STARTUP_SETTLING_RECOVERY_WINDOW_MS &&
+        Number.isFinite(preSeekDriftSec);
+
+      const recoveryBiasSec = useObservedStartupBias
+        ? clampObservedRecoveryBiasSec(preSeekDriftSec)
+        : 0;
+
+      lastRecoveryBiasSec = recoveryBiasSec;
+      lastRecoveryBiasMode = useObservedStartupBias
+        ? "observed startup drift"
+        : "canonical target";
+
+      return expectedSec + recoveryBiasSec;
     }
 
     async function hardSyncToExpectedTime(reason, preSeekDriftSec){
@@ -1298,14 +1343,14 @@
       if(expected == null) return false;
       if(!isFinite(audio.duration) || expected >= audio.duration) return false;
 
-      const compensatedTarget = Math.min(
-        getCompensatedMediaTargetSec(expected),
+      const recoveryTarget = Math.min(
+        Math.max(0, getRecoveryMediaTargetSec(expected, preSeekDriftSec)),
         audio.duration - 0.05
       );
-      const bufferedEnd = getBufferedEndFor(compensatedTarget);
+      const bufferedEnd = getBufferedEndFor(recoveryTarget);
 
-      if(bufferedEnd > compensatedTarget + 1){
-        audio.currentTime = compensatedTarget;
+      if(bufferedEnd > recoveryTarget + 1){
+        audio.currentTime = recoveryTarget;
         await waitForSeek();
 
         lastDriftSec = getCurrentDriftSec();
@@ -1335,7 +1380,7 @@
         return true;
       }else{
         setStatus("Sync delayed — buffering");
-        setDebug(`Need audio near ${formatClockTime(compensatedTarget)} before correcting.`);
+        setDebug(`Need audio near ${formatClockTime(recoveryTarget)} before correcting.`);
         return false;
       }
     }
@@ -1545,7 +1590,7 @@
     }
 
     async function seekToFreshStartupTarget(timingOp){
-      // v4.5 experiment:
+      // v4.5/v4.6 startup-target experiment:
       // Never assume a target calculated before an async seek is still current
       // after that seek completes. This is deliberately platform-agnostic.
       //
@@ -1652,7 +1697,7 @@
         }
       }
 
-      // v4.5: one startup path for on-time starts and late joins. The target is
+      // v4.5/v4.6: one startup path for on-time starts and late joins. The target is
       // refreshed after any slow async seek before play() is called.
       await seekToFreshStartupTarget(timingOp);
 
@@ -1679,7 +1724,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.6 recovery can use observed startup drift once · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
