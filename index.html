@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.1 · output-path aware</div>
+      <div class="subtitle">v4.2 · output-path corrected</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -1195,11 +1195,10 @@
 
       if(expected == null) return 0;
 
-      // Acoustic/effective drift, not merely media-playhead drift.
-      // If the output path is 225 ms late, media.currentTime should ideally be
-      // ~225 ms ahead of canonical time; that corresponds to ~0 ms heard drift.
-      refreshOutputLatencyEstimate();
-      return expected - audio.currentTime + outputLatencySec;
+      // Drift is measured against the canonical timeline using the media playhead.
+      // Output-path latency is already compensated in the seek/start target, so
+      // adding it again here would double-count the same delay.
+      return expected - audio.currentTime;
     }
 
     function getCompensatedMediaTargetSec(expectedSec){
@@ -1551,7 +1550,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · drift excludes output latency after compensation · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1890,4 +1889,3 @@
   </script>
 </body>
 </html>
-
