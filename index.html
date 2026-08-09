@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.97</div>
+      <div class="subtitle">v4.98</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -329,7 +329,7 @@
     const STARTUP_SETTLING_RECOVERY_WINDOW_MS = 10000;
     const OBSERVED_RECOVERY_MAX_BIAS_SEC = 0.75;
 
-    // v4.97: platform-agnostic observed-startup correction experiment.
+    // v4.98: platform-agnostic observed-startup correction experiment.
     // v4.9 showed that outputLatency is useful as a
     // diagnostic but does not reliably predict the settled main-audio startup
     // offset. Instead, let the actual media path establish itself, sample the
@@ -341,10 +341,10 @@
     const STARTUP_OBSERVATION_DELAYS_MS = [1000, 1500, 2000];
     const STARTUP_OBSERVATION_MAX_SPREAD_SEC = 0.06;
     const STARTUP_OBSERVATION_MIN_BIAS_SEC = 0.08;
-    // v4.97 experiment: correct 95% of a stable observed startup plateau.
-    // Probe slightly more aggressive correction after v4.96 at 85% left
-    // larger positive residuals than v4.95 in the current Android tests.
-    const STARTUP_OBSERVED_CORRECTION_FACTOR = 0.95;
+    // v4.98 experiment: correct 100% of a stable observed startup plateau.
+    // Probe full correction after v4.97 at 95% repeatedly left a small positive
+    // residual on the current Android speaker/headphone paths.
+    const STARTUP_OBSERVED_CORRECTION_FACTOR = 1.00;
     const POST_SEEK_SETTLING_GRACE_MS = 1500;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
@@ -496,7 +496,7 @@
       return `Output latency: ${outputText}<br>` +
         `Warm-transfer calibration:<br>${passText}<br>` +
         `chosen pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms<br>` +
-        `v4.97 experiment: output latency diagnostic only; stable startup plateau corrected at 95%`;
+        `v4.98 experiment: output latency diagnostic only; stable startup plateau corrected at 100%`;
     }
 
     function clampLatencySec(value){
@@ -1340,7 +1340,7 @@
     }
 
     function getRecoveryMediaTargetSec(expectedSec, preSeekDriftSec){
-      // v4.6–v4.97:
+      // v4.6–v4.98:
       // outputLatency remains diagnostic only. For the FIRST correction within
       // the startup-settling window, use the drift we actually observed as a
       // one-shot empirical lead/lag estimate. Later corrections go straight to
@@ -1431,15 +1431,15 @@
             return;
           }
 
-          // v4.97 applies 95% of the observed plateau. This is a narrow tuning probe
-          // after 85% appeared too conservative, while still leaving a small margin
-          // for post-seek pipeline recovery and encoding no device/platform rule.
+          // v4.98 applies 100% of the observed plateau. This is a narrow tuning probe
+          // to test whether the full observed stable plateau can be removed without
+          // introducing overshoot; still encodes no device/platform rule.
           const conservativeCorrectionSec = clampObservedRecoveryBiasSec(
             plateauSec * STARTUP_OBSERVED_CORRECTION_FACTOR
           );
           startupObservedCorrectionBiasSec = conservativeCorrectionSec;
           startupObservedCorrectionState =
-            `stable ${formatSignedMs(plateauSec)} — applying 95% ${formatSignedMs(conservativeCorrectionSec)}`;
+            `stable ${formatSignedMs(plateauSec)} — applying 100% ${formatSignedMs(conservativeCorrectionSec)}`;
           updateDriftStats();
 
           // Consume this observation exactly once. We correct only the device/run
@@ -1447,13 +1447,13 @@
           startupObservationToken += 1;
 
           const corrected = await hardSyncToExpectedTime(
-            `v4.97 startup correction: 95% of settled drift (${Math.round(conservativeCorrectionSec * 1000)} of ${Math.round(plateauSec * 1000)} ms)`,
+            `v4.98 startup correction: 100% of settled drift (${Math.round(conservativeCorrectionSec * 1000)} of ${Math.round(plateauSec * 1000)} ms)`,
             conservativeCorrectionSec
           );
 
           startupObservedCorrectionState = corrected
-            ? `corrected 95%: plateau ${formatSignedMs(plateauSec)} → applied ${formatSignedMs(conservativeCorrectionSec)}`
-            : `stable ${formatSignedMs(plateauSec)} — 95% correction deferred`;
+            ? `corrected 100%: plateau ${formatSignedMs(plateauSec)} → applied ${formatSignedMs(conservativeCorrectionSec)}`
+            : `stable ${formatSignedMs(plateauSec)} — 100% correction deferred`;
           updateDriftStats();
         }, delay);
       });
@@ -1877,7 +1877,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.97 observes settled startup drift at 1.0/1.5/2.0 s and corrects 95% of a stable plateau once; no platform sniffing; generic controller stands down during observation and post-seek settling · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · warm-transfer bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · output latency diagnostic only · v4.98 observes settled startup drift at 1.0/1.5/2.0 s and corrects 100% of a stable plateau once; no platform sniffing; generic controller stands down during observation and post-seek settling · drift excludes output latency · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
