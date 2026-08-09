@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4.4</div>
+      <div class="subtitle">v4.5</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -307,6 +307,12 @@
     const START_CALIBRATION_SAMPLE_MS = 1200;
     const START_CALIBRATION_MAX_BIAS_SEC = 0.75;
     const OUTPUT_LATENCY_MAX_SEC = 1.5;
+    // v4.5: an asynchronous media seek can itself take long enough that the
+    // canonical show target becomes stale before playback begins. After each
+    // startup seek, re-check the live show clock and, if necessary, retarget.
+    // Keep this bounded so a pathological browser can never trap us in a seek loop.
+    const START_TARGET_STALE_SEC = 0.25;
+    const START_RETARGET_MAX_COUNT = 2;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -379,6 +385,8 @@
         expectedAtCalculationSec: getExpectedTrackTimeSec(),
         mediaAtCalculationSec: audio.currentTime || 0,
         residualAtPlayingSec: null,
+        startupRetargetCount: 0,
+        startupMaxTargetAgeMs: 0,
         settlingSamplesMs: {}
       };
       pendingTimingOperation = op;
@@ -415,7 +423,11 @@
         `500 ${fmtMs(s[500])} · 1s ${fmtMs(s[1000])} · 2s ${fmtMs(s[2000])} · ` +
         `3s ${fmtMs(s[3000])} · 5s ${fmtMs(s[5000])}`;
 
-      return `${label}: calc→seek ${fmtMs(calcToSeek)} · seek ${fmtMs(seekWait)} · seek→play ${fmtMs(seekToPlay)} · play promise ${fmtMs(playPromise)} · calc→playing ${fmtMs(calcToPlaying)}<br>` +
+      const retargetText = op.kind === "start"
+        ? ` · retargets ${op.startupRetargetCount || 0} · max target age ${fmtMs(op.startupMaxTargetAgeMs || 0)}`
+        : "";
+
+      return `${label}: calc→seek ${fmtMs(calcToSeek)} · seek ${fmtMs(seekWait)} · seek→play ${fmtMs(seekToPlay)} · play promise ${fmtMs(playPromise)} · calc→playing ${fmtMs(calcToPlaying)}${retargetText}<br>` +
         `${label} settling: ${settlingText}`;
     }
 
@@ -1532,6 +1544,61 @@
       }
     }
 
+    async function seekToFreshStartupTarget(timingOp){
+      // v4.5 experiment:
+      // Never assume a target calculated before an async seek is still current
+      // after that seek completes. This is deliberately platform-agnostic.
+      //
+      // We seek to the current canonical show position + measured warm-transfer
+      // bias, wait for the browser to complete the seek, then ask the frozen show
+      // clock how old that target has become. If it aged by >=250 ms while waiting,
+      // retarget to the newly-current show position. At most two retargets are
+      // allowed; after that the existing bounded drift recovery remains the safety net.
+      let retargetCount = 0;
+
+      while(true){
+        const expectedAtAssignmentSec = Math.max(
+          0,
+          Math.min(getExpectedTrackTimeSec() || 0, audio.duration - 0.05)
+        );
+        const targetSec = Math.min(
+          expectedAtAssignmentSec + startupCalibrationBiasSec,
+          audio.duration - 0.05
+        );
+
+        timingOp.seekAssignedAtMs = highResNowMs();
+        audio.currentTime = targetSec;
+        await waitForSeek();
+        timingOp.seekedAtMs = highResNowMs();
+
+        const expectedAfterSeekSec = Math.max(
+          0,
+          Math.min(getExpectedTrackTimeSec() || 0, audio.duration - 0.05)
+        );
+        const targetAgeSec = Math.max(0, expectedAfterSeekSec - expectedAtAssignmentSec);
+        const targetAgeMs = Math.round(targetAgeSec * 1000);
+
+        timingOp.startupMaxTargetAgeMs = Math.max(
+          timingOp.startupMaxTargetAgeMs || 0,
+          targetAgeMs
+        );
+
+        if(targetAgeSec < START_TARGET_STALE_SEC){
+          return targetSec;
+        }
+
+        if(retargetCount >= START_RETARGET_MAX_COUNT){
+          setDebug(`${lastClockSyncDebug} · Startup seek remained stale after ${retargetCount} retargets; continuing with bounded drift recovery.`);
+          return targetSec;
+        }
+
+        retargetCount += 1;
+        timingOp.startupRetargetCount = retargetCount;
+        setStatus("Calibrating playback…");
+        setDebug(`${lastClockSyncDebug} · Startup seek aged ${targetAgeMs} ms; refreshing live target (${retargetCount}/${START_RETARGET_MAX_COUNT}).`);
+      }
+    }
+
     async function startPlaybackAtCurrentCorrectOffset(){
       if(scheduledAnchorMs == null){
         throw new Error("No scheduled anchor");
@@ -1564,28 +1631,18 @@
         setStatus("Joining in progress…");
         setDebug(`${lastClockSyncDebug} · Seeking to ${formatClockTime(offsetSec)}.`);
 
-        const biasedJoinTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
-        timingOp.seekAssignedAtMs = highResNowMs();
-        audio.currentTime = biasedJoinTarget;
-        await waitForSeek();
-        timingOp.seekedAtMs = highResNowMs();
-
-        const playable = await waitForPlayableAt(biasedJoinTarget);
+        // Keep the existing late-join buffering gate. The actual performance
+        // seek below will then use a freshly recomputed target.
+        const initialJoinTarget = Math.min(
+          offsetSec + startupCalibrationBiasSec,
+          audio.duration - 0.05
+        );
+        const playable = await waitForPlayableAt(initialJoinTarget);
 
         if(!playable){
           setStatus("Still buffering…");
           setDebug(`${lastClockSyncDebug} · Tap Begin again if needed.`);
           return false;
-        }
-
-        offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
-
-        if(offsetSec < audio.duration){
-          const biasedJoinTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
-          timingOp.seekAssignedAtMs = highResNowMs();
-          audio.currentTime = biasedJoinTarget;
-          await waitForSeek();
-          timingOp.seekedAtMs = highResNowMs();
         }
       }else{
         if(!hasEnoughToStartAt(offsetSec)){
@@ -1593,13 +1650,11 @@
           setDebug(`Waiting for larger mobile buffer at ${formatClockTime(offsetSec)}.`);
           return false;
         }
-
-        const biasedStartTarget = Math.min(offsetSec + startupCalibrationBiasSec, audio.duration - 0.05);
-        timingOp.seekAssignedAtMs = highResNowMs();
-        audio.currentTime = biasedStartTarget;
-        await waitForSeek();
-        timingOp.seekedAtMs = highResNowMs();
       }
+
+      // v4.5: one startup path for on-time starts and late joins. The target is
+      // refreshed after any slow async seek before play() is called.
+      await seekToFreshStartupTarget(timingOp);
 
       showPlayer();
 
@@ -1750,7 +1805,7 @@
         return;
       }
 
-      // CRITICAL v4.3.2 experiment: on a real audience tap, invoke the Web Audio
+      // v4.5 retains the gesture-bound preparation experiment: on a real audience tap, invoke the Web Audio
       // output probe NOW, while this call stack still owns trusted user activation.
       // Do not await it yet; simply starting resume() here is the important part.
       // Automatic retry reuses the already-started probe/context instead of
