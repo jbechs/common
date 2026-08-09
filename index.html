@@ -156,7 +156,7 @@
   <main class="container">
     <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v4</div>
+      <div class="subtitle">v4.1 · output-path aware</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -253,6 +253,15 @@
     let startupCalibrationMeasured = false;
     let startupCalibrationRealElapsedMs = null;
     let startupCalibrationMediaElapsedMs = null;
+    let startupPipelineLossSec = 0;
+
+    // Output-path awareness. We do not identify AirPods/Bluetooth/etc. by name.
+    // When the browser exposes Web Audio outputLatency, we use that estimate
+    // as the acoustic delay between the browser handing off audio and sound
+    // actually emerging from the selected output device.
+    let outputLatencyContext = null;
+    let outputLatencySec = 0;
+    let outputLatencySupported = false;
 
     const START_BUFFER_SEC = 15;
     const LATE_JOIN_BUFFER_SEC = 1.0;
@@ -281,6 +290,7 @@
     // by that measured amount.
     const START_CALIBRATION_SAMPLE_MS = 1200;
     const START_CALIBRATION_MAX_BIAS_SEC = 0.75;
+    const OUTPUT_LATENCY_MAX_SEC = 1.5;
     const NORMAL_RATE = 1.0;
     const INTERRUPTION_RECOVERY_DELAY_MS = 1800;
     const INTERRUPTION_VERIFY_DELAY_MS = 500;
@@ -409,12 +419,65 @@
     }
 
     function calibrationProbeSummary(){
+      const outputText = outputLatencySupported
+        ? `${Math.round(outputLatencySec * 1000)} ms`
+        : "unavailable";
+
       if(!startupCalibrationMeasured){
-        return "Pre-curtain calibration: —";
+        return `Output latency: ${outputText}<br>Pre-curtain calibration: —`;
       }
 
+      const pipelineLossMs = Math.round(startupPipelineLossSec * 1000);
       const biasMs = Math.round(startupCalibrationBiasSec * 1000);
-      return `Pre-curtain calibration: real ${fmtMs(startupCalibrationRealElapsedMs)} · media ${fmtMs(startupCalibrationMediaElapsedMs)} · learned bias ${biasMs} ms`;
+      return `Output latency: ${outputText}<br>` +
+        `Pre-curtain calibration: real ${fmtMs(startupCalibrationRealElapsedMs)} · media ${fmtMs(startupCalibrationMediaElapsedMs)} · pipeline loss ${pipelineLossMs} ms · start bias ${biasMs} ms`;
+    }
+
+    function clampLatencySec(value){
+      if(!Number.isFinite(value) || value < 0) return 0;
+      return Math.min(OUTPUT_LATENCY_MAX_SEC, value);
+    }
+
+    function refreshOutputLatencyEstimate(){
+      if(!outputLatencyContext) return outputLatencySec;
+
+      try{
+        const candidate = outputLatencyContext.outputLatency;
+        if(Number.isFinite(candidate) && candidate >= 0){
+          outputLatencySec = clampLatencySec(candidate);
+          outputLatencySupported = true;
+        }
+      }catch(err){
+        // Keep the last good estimate. Output-latency support is optional.
+      }
+
+      return outputLatencySec;
+    }
+
+    async function prepareOutputLatencyProbe(){
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if(!AudioContextCtor) return false;
+
+      try{
+        if(!outputLatencyContext){
+          outputLatencyContext = new AudioContextCtor({ latencyHint: "playback" });
+        }
+
+        if(outputLatencyContext.state === "suspended"){
+          await outputLatencyContext.resume();
+        }
+
+        // Give the context a moment to bind to the currently selected output.
+        await new Promise(resolve=>setTimeout(resolve, 80));
+        refreshOutputLatencyEstimate();
+        updateTimingProbe();
+        return outputLatencySupported;
+      }catch(err){
+        outputLatencySupported = false;
+        outputLatencySec = 0;
+        updateTimingProbe();
+        return false;
+      }
     }
 
     function updateTimingProbe(){
@@ -885,6 +948,9 @@
       startupCalibrationMeasured = false;
       startupCalibrationRealElapsedMs = null;
       startupCalibrationMediaElapsedMs = null;
+      startupPipelineLossSec = 0;
+      startupPipelineLossSec = 0;
+      refreshOutputLatencyEstimate();
       updateTimingProbe();
 
       try{
@@ -928,9 +994,16 @@
 
         startupCalibrationRealElapsedMs = Math.round(realElapsedSec * 1000);
         startupCalibrationMediaElapsedMs = Math.round(mediaElapsedSec * 1000);
+        startupPipelineLossSec = Math.max(0, measuredLossSec);
+
+        // The two measurements can describe overlapping portions of the same
+        // playback pipeline, especially with wireless outputs. Do NOT add them
+        // blindly. Use the larger observed delay as the conservative start lead.
+        refreshOutputLatencyEstimate();
+        const learnedStartLeadSec = Math.max(startupPipelineLossSec, outputLatencySec);
         startupCalibrationBiasSec = Math.max(
-          -START_CALIBRATION_MAX_BIAS_SEC,
-          Math.min(START_CALIBRATION_MAX_BIAS_SEC, measuredLossSec)
+          0,
+          Math.min(START_CALIBRATION_MAX_BIAS_SEC, learnedStartLeadSec)
         );
         startupCalibrationMeasured = true;
 
@@ -952,6 +1025,7 @@
         audio.muted = false;
         startupCalibrationBiasSec = 0;
         startupCalibrationMeasured = false;
+        startupPipelineLossSec = 0;
         updateTimingProbe();
         return false;
       }
@@ -1121,7 +1195,16 @@
 
       if(expected == null) return 0;
 
-      return expected - audio.currentTime;
+      // Acoustic/effective drift, not merely media-playhead drift.
+      // If the output path is 225 ms late, media.currentTime should ideally be
+      // ~225 ms ahead of canonical time; that corresponds to ~0 ms heard drift.
+      refreshOutputLatencyEstimate();
+      return expected - audio.currentTime + outputLatencySec;
+    }
+
+    function getCompensatedMediaTargetSec(expectedSec){
+      refreshOutputLatencyEstimate();
+      return expectedSec + outputLatencySec;
     }
 
     async function hardSyncToExpectedTime(reason, preSeekDriftSec){
@@ -1130,10 +1213,14 @@
       if(expected == null) return false;
       if(!isFinite(audio.duration) || expected >= audio.duration) return false;
 
-      const bufferedEnd = getBufferedEndFor(expected);
+      const compensatedTarget = Math.min(
+        getCompensatedMediaTargetSec(expected),
+        audio.duration - 0.05
+      );
+      const bufferedEnd = getBufferedEndFor(compensatedTarget);
 
-      if(bufferedEnd > expected + 1){
-        audio.currentTime = expected;
+      if(bufferedEnd > compensatedTarget + 1){
+        audio.currentTime = compensatedTarget;
         await waitForSeek();
 
         lastDriftSec = getCurrentDriftSec();
@@ -1163,7 +1250,7 @@
         return true;
       }else{
         setStatus("Sync delayed — buffering");
-        setDebug(`Need audio near ${formatClockTime(expected)} before correcting.`);
+        setDebug(`Need audio near ${formatClockTime(compensatedTarget)} before correcting.`);
         return false;
       }
     }
@@ -1464,7 +1551,7 @@
       hideStartNow();
       setCountdown("");
       setStatus("Playing");
-      setDebug(`${lastClockSyncDebug || "Clock prepared"} · measured start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
+      setDebug(`${lastClockSyncDebug || "Clock prepared"} · output latency ${outputLatencySupported ? Math.round(outputLatencySec * 1000) + " ms" : "unavailable"} · start bias ${Math.round(startupCalibrationBiasSec * 1000)} ms · ${getNetworkResilienceText()} · Network changes ignored during performance.`);
 
       lastDriftSec = getCurrentDriftSec();
 
@@ -1563,6 +1650,7 @@
       startupCalibrationMeasured = false;
       startupCalibrationRealElapsedMs = null;
       startupCalibrationMediaElapsedMs = null;
+      startupPipelineLossSec = 0;
       updateTimingProbe();
 
       setDebug("");
@@ -1591,6 +1679,9 @@
         await ensureMetadata();
         updateTransport();
 
+        // This stays feature-detected. Unsupported/older browsers simply fall
+        // back to the pre-curtain behavioral calibration already used by v4.
+        await prepareOutputLatencyProbe();
         await primeAudioElement();
 
         setStatus("Calibrating playback…");
