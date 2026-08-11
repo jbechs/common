@@ -2400,6 +2400,11 @@
         intercomLog("attempting manager…");
         const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
         intercomConnection = conn;
+        const pc = conn.peerConnection;
+        if(pc){
+          pc.addEventListener("iceconnectionstatechange", ()=> intercomLog(`ICE ${pc.iceConnectionState} · PC ${pc.connectionState}`));
+          pc.addEventListener("connectionstatechange", ()=> intercomLog(`ICE ${pc.iceConnectionState} · PC ${pc.connectionState}`));
+        }
         let opened = false;
         const retryIfNeeded = ()=>{
           if(intercomConnection === conn) intercomConnection = null;
@@ -2420,8 +2425,18 @@
             setIntercomDuck(data.live === true);
           }
         });
-        conn.on("close", retryIfNeeded);
-        conn.on("error", retryIfNeeded);
+        conn.on("close", ()=>{
+          const pc = conn.peerConnection;
+          intercomLog(`data closed · ICE ${pc ? pc.iceConnectionState : "no-pc"} · PC ${pc ? pc.connectionState : "no-pc"}`);
+          retryIfNeeded();
+        });
+        conn.on("error", err=>{
+          const pc = conn.peerConnection;
+          const ice = pc ? pc.iceConnectionState : "no-pc";
+          const state = pc ? pc.connectionState : "no-pc";
+          intercomLog(`data error ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"} · ICE ${ice} · PC ${state}`);
+          retryIfNeeded();
+        });
       }catch(_){ scheduleGodMicReconnect(); }
     }
 
