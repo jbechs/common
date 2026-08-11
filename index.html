@@ -2371,6 +2371,7 @@
     try{
       sessionStorage.removeItem(SESSION_KEY);
       sessionStorage.removeItem(SESSION_START_KEY);
+      sessionStorage.removeItem(BLUE_ARMED_KEY);
     }catch(_e){}
   }
 
@@ -2397,8 +2398,12 @@
   const startField = document.getElementById("startTime");
   let intercomStartDirty = false;
   if(startField){
-    startField.addEventListener("input", () => { intercomStartDirty = true; });
-    startField.addEventListener("change", () => { intercomStartDirty = true; });
+    const markNewShow = () => {
+      intercomStartDirty = true;
+      try{ sessionStorage.removeItem(BLUE_ARMED_KEY); }catch(_e){}
+    };
+    startField.addEventListener("input", markNewShow);
+    startField.addEventListener("change", markNewShow);
   }
   const sessionDiag = document.getElementById("intercomSessionDiagnostics");
   const intercomTimingDiag = document.getElementById("intercomTimingDiagnostics");
@@ -2409,6 +2414,10 @@
   let intercomRecentJitterSumMs = 0;
   let lastJbDelay = null;
   let lastJbCount = null;
+
+  let liveWatchdogTimer = null;
+  let liveLastPackets = null;
+  let liveLastAdvanceMs = 0;
 
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
@@ -2455,13 +2464,17 @@
   // Otherwise show the current field as a proposed new session without freezing it yet.
   try{
     const snapshot = storedSessionSnapshot();
-    if(storedSessionIsLive(snapshot)){
+    const wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1";
+
+    if(wasBlueArmed && storedSessionIsLive(snapshot)){
+      // Genuine participant refresh/rejoin: restore the show this tab had joined.
       sessionId = snapshot.id;
       if(startField && snapshot.startValue){
         startField.value = snapshot.startValue;
       }
-      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id;
+      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
     }else{
+      // Ordinary refresh before Begin: leave Common's >60-second default intact.
       clearStoredIntercomSession();
       sessionId = null;
       const proposed = intercomChannelForStartValue(startField && startField.value);
@@ -2522,6 +2535,53 @@
     pollTimer = setInterval(pollSession, POLL_MS);
   }
 
+
+
+  function setIntercomLive(active){
+    if(intercomLive) intercomLive.classList.toggle("active", !!active);
+  }
+
+  function stopLiveWatchdog(){
+    if(liveWatchdogTimer) clearInterval(liveWatchdogTimer);
+    liveWatchdogTimer = null;
+    liveLastPackets = null;
+    liveLastAdvanceMs = 0;
+  }
+
+  async function sampleLivePackets(c){
+    const pc = c && c.peerConnection;
+    if(!pc || typeof pc.getStats !== "function") return;
+
+    try{
+      const report = await pc.getStats();
+      let packets = null;
+      report.forEach(stat => {
+        if(stat.type === "inbound-rtp" &&
+           stat.kind === "audio" &&
+           !stat.isRemote &&
+           Number.isFinite(stat.packetsReceived)){
+          packets = stat.packetsReceived;
+        }
+      });
+
+      if(packets == null) return;
+
+      if(liveLastPackets == null || packets > liveLastPackets){
+        liveLastPackets = packets;
+        liveLastAdvanceMs = Date.now();
+        setIntercomLive(true);
+      }else if(liveLastAdvanceMs && Date.now() - liveLastAdvanceMs > 2500){
+        setIntercomLive(false);
+      }
+    }catch(_e){}
+  }
+
+  function startLiveWatchdog(c){
+    stopLiveWatchdog();
+    liveLastAdvanceMs = Date.now();
+    sampleLivePackets(c);
+    liveWatchdogTimer = setInterval(() => sampleLivePackets(c), 750);
+  }
 
   function stopIntercomStats(){
     if(intercomStatsTimer) clearInterval(intercomStatsTimer);
@@ -2635,11 +2695,21 @@
       audioEl.src = "";
       audioEl.srcObject = stream;
 
+      const track = stream.getAudioTracks && stream.getAudioTracks()[0];
+      if(track){
+        track.addEventListener("ended", () => setIntercomLive(false), {once:true});
+        track.addEventListener("mute", () => setIntercomLive(false));
+        track.addEventListener("unmute", () => setIntercomLive(true));
+      }
+
+      startLiveWatchdog(c);
+
       try{
         await audioEl.play();
-        if(intercomLive) intercomLive.classList.add("active");
+        setIntercomLive(true);
         set("LIVE — receiving audio");
       }catch(_e){
+        setIntercomLive(false);
         set("LIVE — audio waiting for user gesture");
       }
     });
@@ -2647,8 +2717,9 @@
     const finish = () => {
       if(call === c) call = null;
       stopIntercomStats();
+      stopLiveWatchdog();
+      setIntercomLive(false);
       if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — broadcast ended";
-      if(intercomLive) intercomLive.classList.remove("active");
       try{
         audioEl.pause();
         audioEl.srcObject = null;
@@ -2694,6 +2765,20 @@
     startPeer();
   });
 
+  const programAudio = document.getElementById("audio");
+  if(programAudio){
+    programAudio.addEventListener("ended", () => {
+      try{
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(SESSION_START_KEY);
+        sessionStorage.removeItem(BLUE_ARMED_KEY);
+      }catch(_e){}
+      sessionId = null;
+      if(sessionDiag) sessionDiag.textContent = "Session: —";
+      const baseDiag = document.getElementById("intercomDiagnostics");
+      if(baseDiag) baseDiag.textContent = "Intercom — show ended";
+    });
+  }
   const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
 
   if(begin && btn){
@@ -2703,6 +2788,9 @@
       if(baseDiag) baseDiag.textContent = armed
         ? "Intercom — session armed"
         : "Intercom — session not armed";
+      if(armed){
+        try{ sessionStorage.setItem(BLUE_ARMED_KEY, "1"); }catch(_e){}
+      }
       if(!armed){
         set("Intercom session needs a Start Time");
         return;
