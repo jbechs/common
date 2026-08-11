@@ -2338,6 +2338,11 @@
     return clean ? `common-v6-${clean}` : null;
   }
 
+  window.armCommonIntercomSession = (value) => {
+    CHANNEL = intercomChannelForStartValue(value);
+    return CHANNEL;
+  };
+
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   let peer = null, conn = null, call = null;
@@ -2485,8 +2490,11 @@
     begin.addEventListener("click", () => {
       // v6 session scope: intercom session identity comes only from the selected
       // Start Time. Matching Start Time = matching show intercom session.
-      CHANNEL = intercomChannelForStartValue(startField && startField.value);
-      if(!CHANNEL){
+      const armedChannel =
+        typeof window.armCommonIntercomSession === "function"
+          ? window.armCommonIntercomSession(startField && startField.value)
+          : null;
+      if(!armedChannel){
         const status = document.getElementById("isoBlueStatus");
         if(status) status.textContent = "Intercom session needs a Start Time";
         return;
