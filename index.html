@@ -2367,6 +2367,12 @@
            now <= (startMs + SESSION_LATE_MS);
   }
 
+  function storedSessionIsActuallyUnderway(snapshot){
+    if(!storedSessionIsLive(snapshot)) return false;
+    const startMs = new Date(snapshot.startValue).getTime();
+    return Number.isFinite(startMs) && Date.now() >= startMs;
+  }
+
   function clearStoredIntercomSession(){
     try{
       sessionStorage.removeItem(SESSION_KEY);
@@ -2517,19 +2523,20 @@
     const requested = intercomChannelForStartValue(value);
     const snapshot = storedSessionSnapshot();
 
-    if(intercomStartDirty){
-      // Deliberate Start Time edit = deliberate new performance/session.
-      sessionId = requested;
-      if(sessionId) saveIntercomSession(sessionId, value);
-    }else if(storedSessionIsLive(snapshot)){
-      // Refresh/rejoin during the current show's recovery window.
+    let wasBlueArmed = false;
+    try{ wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1"; }catch(_e){}
+
+    const exactRunningRejoin =
+      wasBlueArmed &&
+      storedSessionIsActuallyUnderway(snapshot) &&
+      snapshot.startValue === value;
+
+    if(exactRunningRejoin){
       sessionId = snapshot.id;
-      if(startField && snapshot.startValue && startField.value !== snapshot.startValue){
-        startField.value = snapshot.startValue;
-      }
       if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
     }else{
-      // Old performance is outside the rejoin window; current field starts a new room.
+      // Audience rule: Begin always honors the Start Time visibly shown on screen.
+      // A stale earlier session may never silently replace it.
       clearStoredIntercomSession();
       sessionId = requested;
       if(sessionId) saveIntercomSession(sessionId, value);
@@ -2539,24 +2546,24 @@
     return sessionId;
   }
 
-  // Before Begin: restore the old show only if it is still a valid rejoin.
-  // Otherwise show the current field as a proposed new session without freezing it yet.
+  // Before Begin, the freshly generated visible Start Time is authoritative.
+  // We keep old storage only as metadata for an exact mid-show rejoin; we never
+  // rewrite the field behind the audience's back.
   try{
     const snapshot = storedSessionSnapshot();
     const wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1";
+    const visibleValue = startField && startField.value;
+    const exactRunningRejoin =
+      wasBlueArmed &&
+      storedSessionIsActuallyUnderway(snapshot) &&
+      snapshot.startValue === visibleValue;
 
-    if(wasBlueArmed && storedSessionIsLive(snapshot)){
-      // Genuine participant refresh/rejoin: restore the show this tab had joined.
+    if(exactRunningRejoin){
       sessionId = snapshot.id;
-      if(startField && snapshot.startValue){
-        startField.value = snapshot.startValue;
-      }
       if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
     }else{
-      // Ordinary refresh before Begin: leave Common's >60-second default intact.
-      clearStoredIntercomSession();
       sessionId = null;
-      const proposed = intercomChannelForStartValue(startField && startField.value);
+      const proposed = intercomChannelForStartValue(visibleValue);
       if(sessionDiag) sessionDiag.textContent =
         "Session: " + (proposed || "—") + " (proposed)";
     }
@@ -2899,6 +2906,21 @@
 
   if(begin && btn){
     begin.addEventListener("click", () => {
+      try{
+        const snapshot = storedSessionSnapshot();
+        const visibleValue = startField && startField.value;
+        const exactRunningRejoin =
+          sessionStorage.getItem(BLUE_ARMED_KEY) === "1" &&
+          storedSessionIsActuallyUnderway(snapshot) &&
+          snapshot.startValue === visibleValue;
+
+        if(!exactRunningRejoin){
+          sessionStorage.removeItem(BLUE_ARMED_KEY);
+          sessionStorage.removeItem(SESSION_KEY);
+          sessionStorage.removeItem(SESSION_START_KEY);
+        }
+      }catch(_e){}
+
       const armed = freezeSession(startField && startField.value);
       const baseDiag = document.getElementById("intercomDiagnostics");
       if(baseDiag) baseDiag.textContent = armed
