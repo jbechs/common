@@ -187,7 +187,7 @@
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
 <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v5</div>
+      <div class="subtitle">v6</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -204,7 +204,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="intercomDiagnostics" class="timingProbe">Intercom — receiver idle</div>
+      <div id="intercomDiagnostics" class="timingProbe">Intercom — session not armed</div>
     </div>
 
 
@@ -2331,7 +2331,13 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-presence-3651686aed';
+  let CHANNEL = null;
+
+  function intercomChannelForStartValue(value){
+    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
+    return clean ? `common-v6-${clean}` : null;
+  }
+
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   let peer = null, conn = null, call = null;
@@ -2349,6 +2355,11 @@
     if(peer) return;
     btn.disabled = true;
     set("Opening listener…");
+    if(!CHANNEL){
+      set("Intercom session not armed");
+      btn.disabled=false;
+      return;
+    }
     if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
     peer = new Peer();
     let retryTimer = null;
@@ -2412,15 +2423,38 @@
 
     peer.on("open", connectToManager);
     peer.on("call", c => {
+      // Every broadcast is a fresh media call. Retire any stale prior call
+      // reference so this receiver can accept repeated god-mic sessions.
+      if(call && call !== c){
+        try{ call.close(); }catch(_e){}
+      }
       call = c;
       set("Media call received…");
       c.answer();
+
       c.on("stream", async stream => {
         audioEl.srcObject = stream;
-        try{ await audioEl.play(); set("LIVE — receiving audio"); }
-        catch(e){ set("Tap Listen again to play audio"); btn.disabled=false; }
+        try{
+          await audioEl.play();
+          set("LIVE — receiving audio");
+        }catch(e){
+          set("Audio waiting for user gesture");
+        }
       });
-      c.on("close", () => set("Broadcast ended"));
+
+      const finishCall = () => {
+        if(call === c) call = null;
+        try{
+          audioEl.pause();
+          audioEl.srcObject = null;
+        }catch(_e){}
+        set(conn && conn.open
+          ? "Connected — waiting for live voice…"
+          : "Waiting for manager…");
+      };
+
+      c.on("close", finishCall);
+      c.on("error", finishCall);
     });
     peer.on("error", e => {
       if(e && e.type === "peer-unavailable"){
@@ -2445,9 +2479,19 @@
   const begin = document.getElementById("playButton");
   const listen = document.getElementById("isoListenBtn");
   const remote = document.getElementById("isoRemoteAudio");
+  const startField = document.getElementById("startTime");
   const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
   if(begin && listen){
     begin.addEventListener("click", () => {
+      // v6 session scope: intercom session identity comes only from the selected
+      // Start Time. Matching Start Time = matching show intercom session.
+      CHANNEL = intercomChannelForStartValue(startField && startField.value);
+      if(!CHANNEL){
+        const status = document.getElementById("isoBlueStatus");
+        if(status) status.textContent = "Intercom session needs a Start Time";
+        return;
+      }
+
       // Preserve user activation for future remote audio playback.
       if(remote){
         try{
