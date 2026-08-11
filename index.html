@@ -2453,16 +2453,26 @@
       }
     }
 
-    // Arm during preshow so the manager can speak to actors/audience before curtain.
-    // This remains an optional, isolated network layer and does not touch the sync engine.
-    preshowAudio.addEventListener("playing", ()=>{
-      if(!intercomReceiverStarted) setTimeout(startGodMicReceiver, 750);
-    });
+    // Arm during preshow so the manager can speak before curtain, with a
+    // polling fallback so a missed media event can never leave the receiver dormant.
+    // This checks playback state only; it never changes the show clock or sync engine.
+    let intercomArmTimer = null;
+    function armIntercomIfPlaybackActive(){
+      if(intercomReceiverStarted){
+        if(intercomArmTimer){ clearInterval(intercomArmTimer); intercomArmTimer = null; }
+        return;
+      }
+      const preshowActive = preshowPlaying && !preshowAudio.paused;
+      const mainActive = !audio.paused && isFinite(audio.currentTime);
+      if(preshowActive || mainActive){
+        setTimeout(()=>{ if(!intercomReceiverStarted) startGodMicReceiver(); }, 350);
+      }
+    }
 
-    // Fallback for late join / no-preshow cases.
-    audio.addEventListener("playing", ()=>{
-      if(!intercomReceiverStarted) setTimeout(startGodMicReceiver, 750);
-    });
+    preshowAudio.addEventListener("playing", armIntercomIfPlaybackActive);
+    audio.addEventListener("playing", armIntercomIfPlaybackActive);
+    intercomArmTimer = setInterval(armIntercomIfPlaybackActive, 500);
+    window.addEventListener("pageshow", armIntercomIfPlaybackActive);
 
 
     updateTransport();
