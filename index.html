@@ -1523,85 +1523,6 @@
         setStatus(reason);
     
 
-    // --- COMMON GOD-MIC RECEIVER -----------------------------------------
-    // Receiver-only layer. It is intentionally isolated from the v4.98 sync
-    // engine and does not initialize until AFTER the main performance audio is
-    // already playing. It never reads/writes the show clock, currentTime,
-    // playbackRate, drift controller, hard seeks, calibration, or recovery.
-    const intercomAudio = document.getElementById("intercomAudio");
-    const INTERCOM_HOST_ID = "common-god-mic-v1";
-    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
-    let intercomPeer = null;
-    let intercomConnection = null;
-    let intercomCall = null;
-    let intercomRetryTimer = null;
-    let intercomLibraryPromise = null;
-    let intercomReceiverStarted = false;
-
-    function loadIntercomLibrary(){
-      if(window.Peer) return Promise.resolve();
-      if(intercomLibraryPromise) return intercomLibraryPromise;
-      intercomLibraryPromise = new Promise((resolve,reject)=>{
-        const script = document.createElement("script");
-        script.src = INTERCOM_PEERJS_SRC;
-        script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
-        document.head.appendChild(script);
-      });
-      return intercomLibraryPromise;
-    }
-
-    function scheduleGodMicReconnect(delay=2000){
-      clearTimeout(intercomRetryTimer);
-      intercomRetryTimer = setTimeout(connectGodMic, delay);
-    }
-
-    function connectGodMic(){
-      if(!intercomPeer || intercomPeer.destroyed || !intercomPeer.open) return;
-      try{
-        if(intercomConnection){ try{ intercomConnection.close(); }catch(_){ } }
-        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
-        intercomConnection = conn;
-        conn.on("open", ()=>{ try{ conn.send({type:"listener-ready"}); }catch(_){ } });
-        conn.on("close", ()=> scheduleGodMicReconnect());
-        conn.on("error", ()=> scheduleGodMicReconnect());
-      }catch(_){ scheduleGodMicReconnect(); }
-    }
-
-    async function startGodMicReceiver(){
-      if(intercomReceiverStarted) return;
-      intercomReceiverStarted = true;
-      try{
-        await loadIntercomLibrary();
-        intercomPeer = new Peer();
-        intercomPeer.on("open", ()=> connectGodMic());
-        intercomPeer.on("call", call=>{
-          if(intercomCall){ try{ intercomCall.close(); }catch(_){ } }
-          intercomCall = call;
-          call.answer(); // receiver sends no microphone stream
-          call.on("stream", async stream=>{
-            intercomAudio.srcObject = stream;
-            try{ await intercomAudio.play(); }catch(_){ }
-          });
-          call.on("close", ()=> scheduleGodMicReconnect());
-        });
-        intercomPeer.on("error", err=>{
-          if(err && err.type === "peer-unavailable") scheduleGodMicReconnect();
-        });
-      }catch(_){
-        // God mic is optional. Common itself continues untouched.
-        intercomReceiverStarted = false;
-        scheduleGodMicReconnect(3000);
-      }
-    }
-
-    // Protect startup calibration: arm the optional receiver only after the
-    // synchronized main track has actually entered playback and settled briefly.
-    audio.addEventListener("playing", ()=>{
-      if(!intercomReceiverStarted) setTimeout(startGodMicReceiver, 2500);
-    });
-
     updateTransport();
         updateDriftStats();
         return true;
@@ -2370,6 +2291,86 @@
       }
     });
 
+
+
+    // --- COMMON GOD-MIC RECEIVER -----------------------------------------
+    // Receiver-only layer. It is intentionally isolated from the v4.98 sync
+    // engine and does not initialize until AFTER the main performance audio is
+    // already playing. It never reads/writes the show clock, currentTime,
+    // playbackRate, drift controller, hard seeks, calibration, or recovery.
+    const intercomAudio = document.getElementById("intercomAudio");
+    const INTERCOM_HOST_ID = "common-god-mic-v1";
+    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
+    let intercomPeer = null;
+    let intercomConnection = null;
+    let intercomCall = null;
+    let intercomRetryTimer = null;
+    let intercomLibraryPromise = null;
+    let intercomReceiverStarted = false;
+
+    function loadIntercomLibrary(){
+      if(window.Peer) return Promise.resolve();
+      if(intercomLibraryPromise) return intercomLibraryPromise;
+      intercomLibraryPromise = new Promise((resolve,reject)=>{
+        const script = document.createElement("script");
+        script.src = INTERCOM_PEERJS_SRC;
+        script.async = true;
+        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
+        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
+        document.head.appendChild(script);
+      });
+      return intercomLibraryPromise;
+    }
+
+    function scheduleGodMicReconnect(delay=2000){
+      clearTimeout(intercomRetryTimer);
+      intercomRetryTimer = setTimeout(connectGodMic, delay);
+    }
+
+    function connectGodMic(){
+      if(!intercomPeer || intercomPeer.destroyed || !intercomPeer.open) return;
+      try{
+        if(intercomConnection){ try{ intercomConnection.close(); }catch(_){ } }
+        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
+        intercomConnection = conn;
+        conn.on("open", ()=>{ try{ conn.send({type:"listener-ready"}); }catch(_){ } });
+        conn.on("close", ()=> scheduleGodMicReconnect());
+        conn.on("error", ()=> scheduleGodMicReconnect());
+      }catch(_){ scheduleGodMicReconnect(); }
+    }
+
+    async function startGodMicReceiver(){
+      if(intercomReceiverStarted) return;
+      intercomReceiverStarted = true;
+      try{
+        await loadIntercomLibrary();
+        intercomPeer = new Peer();
+        intercomPeer.on("open", ()=> connectGodMic());
+        intercomPeer.on("call", call=>{
+          if(intercomCall){ try{ intercomCall.close(); }catch(_){ } }
+          intercomCall = call;
+          call.answer(); // receiver sends no microphone stream
+          call.on("stream", async stream=>{
+            intercomAudio.srcObject = stream;
+            try{ await intercomAudio.play(); }catch(_){ }
+          });
+          call.on("close", ()=> scheduleGodMicReconnect());
+        });
+        intercomPeer.on("error", err=>{
+          if(err && err.type === "peer-unavailable") scheduleGodMicReconnect();
+        });
+      }catch(_){
+        // God mic is optional. Common itself continues untouched.
+        intercomReceiverStarted = false;
+        scheduleGodMicReconnect(3000);
+      }
+    }
+
+    // Protect startup calibration: arm the optional receiver only after the
+    // synchronized main track has actually entered playback and settled briefly.
+    audio.addEventListener("playing", ()=>{
+      if(!intercomReceiverStarted) setTimeout(startGodMicReceiver, 2500);
+    });
 
 
     updateTransport();
