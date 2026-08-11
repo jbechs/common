@@ -2393,6 +2393,8 @@
 
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
+  const begin = document.getElementById("playButton");
+  const startField = document.getElementById("startTime");
   let intercomStartDirty = false;
   if(startField){
     startField.addEventListener("input", () => { intercomStartDirty = true; });
@@ -2692,13 +2694,15 @@
     startPeer();
   });
 
-  const begin = document.getElementById("playButton");
-  const startField = document.getElementById("startTime");
   const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
 
   if(begin && btn){
     begin.addEventListener("click", () => {
       const armed = freezeSession(startField && startField.value);
+      const baseDiag = document.getElementById("intercomDiagnostics");
+      if(baseDiag) baseDiag.textContent = armed
+        ? "Intercom — session armed"
+        : "Intercom — session not armed";
       if(!armed){
         set("Intercom session needs a Start Time");
         return;
