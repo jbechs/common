@@ -163,7 +163,7 @@
       background-attachment:fixed;
     }
     input, input[type="datetime-local"]{ background:#0b2742 !important; }
-    .diagnosticsToggle{ background:#061427 !important; color:#17456f !important; }
+    .diagnosticsToggle{ background:#020915 !important; color:#0a2138 !important; border-color:#07182a !important; opacity:.48; }
 
 
     .intercomLive{
@@ -178,10 +178,25 @@
     }
     .intercomLive.active{ opacity:1; }
 
+  
+    /* Portrait-only presentation: hide the app in landscape without touching playback. */
+    #portraitOnlyNotice{ display:none; }
+    @media (orientation: landscape) and (max-height: 600px){
+      body > *:not(#portraitOnlyNotice){ visibility:hidden !important; }
+      #portraitOnlyNotice{
+        display:flex !important; position:fixed; inset:0; z-index:2147483647;
+        align-items:center; justify-content:center; text-align:center;
+        padding:24px; box-sizing:border-box; background:#05070b; color:#fff;
+        font:600 18px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      }
+    }
+
   </style>
 </head>
 
 <body>
+  <div id="portraitOnlyNotice" role="status">Please rotate your phone upright.</div>
+
 
   <main class="container">
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
@@ -2960,3 +2975,4 @@
 
 </body>
 </html>
+
