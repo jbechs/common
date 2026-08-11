@@ -35,6 +35,23 @@
       margin-bottom:28px;
     }
 
+    .intercomLiveIndicator{
+      min-height:1.05em;
+      margin-bottom:2px;
+      font-size:.72rem;
+      font-weight:700;
+      letter-spacing:.16em;
+      text-transform:uppercase;
+      color:#ffb4b4;
+      opacity:0;
+      transition:opacity 120ms ease;
+      user-select:none;
+    }
+
+    .intercomLiveIndicator.active{
+      opacity:1;
+    }
+
     h1{
       margin:0;
       font-size:1.8rem;
@@ -161,6 +178,7 @@
 
   <main class="container">
     <div class="header">
+      <div id="intercomLiveIndicator" class="intercomLiveIndicator" aria-live="polite" aria-hidden="true">● LIVE</div>
       <h1>common</h1>
       <div class="subtitle">v5</div>
     </div>
@@ -2296,11 +2314,12 @@
 
     // --- COMMON GOD-MIC RECEIVER -----------------------------------------
     // Receiver-only layer. It is intentionally isolated from the v4.98 sync
-    // engine and does not initialize until AFTER the main performance audio is
-    // already playing. It never reads/writes the show clock, currentTime,
+    // engine and initializes only after preshow or main playback has begun.
+    // It never reads/writes the show clock, currentTime,
     // playbackRate, drift controller, hard seeks, calibration, or recovery.
     const intercomAudio = document.getElementById("intercomAudio");
     const intercomDiagnostics = document.getElementById("intercomDiagnostics");
+    const intercomLiveIndicator = document.getElementById("intercomLiveIndicator");
     function intercomLog(msg){
       const stamp = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
       intercomDiagnostics.textContent = `Intercom — ${msg} · ${stamp}`;
@@ -2313,6 +2332,36 @@
     let intercomRetryTimer = null;
     let intercomLibraryPromise = null;
     let intercomReceiverStarted = false;
+
+    // God-mic mix: drop program audio by 15 dB while the manager mic is live.
+    // Volume only; never touches media timing/currentTime/playbackRate/sync.
+    const INTERCOM_DUCK_DB = 15;
+    const INTERCOM_DUCK_FACTOR = Math.pow(10, -INTERCOM_DUCK_DB / 20);
+    let intercomDuckActive = false;
+    let intercomSavedMainVolume = null;
+    let intercomSavedPreshowVolume = null;
+
+    function setIntercomDuck(active){
+      if(active === intercomDuckActive) return;
+      intercomDuckActive = active;
+      if(intercomLiveIndicator){
+        intercomLiveIndicator.classList.toggle("active", active);
+        intercomLiveIndicator.setAttribute("aria-hidden", active ? "false" : "true");
+      }
+      if(active){
+        intercomSavedMainVolume = audio.volume;
+        intercomSavedPreshowVolume = preshowAudio.volume;
+        audio.volume = Math.max(0, Math.min(1, audio.volume * INTERCOM_DUCK_FACTOR));
+        preshowAudio.volume = Math.max(0, Math.min(1, preshowAudio.volume * INTERCOM_DUCK_FACTOR));
+        intercomLog(`program dunked -${INTERCOM_DUCK_DB} dB`);
+      }else{
+        if(intercomSavedMainVolume != null) audio.volume = intercomSavedMainVolume;
+        if(intercomSavedPreshowVolume != null) preshowAudio.volume = intercomSavedPreshowVolume;
+        intercomSavedMainVolume = null;
+        intercomSavedPreshowVolume = null;
+        intercomLog("program restored");
+      }
+    }
 
     function loadIntercomLibrary(){
       if(window.Peer){ intercomLog("PeerJS already loaded"); return Promise.resolve(); }
@@ -2347,6 +2396,7 @@
         let opened = false;
         const retryIfNeeded = ()=>{
           if(intercomConnection === conn) intercomConnection = null;
+          if(opened) setIntercomDuck(false);
           intercomLog(opened ? "manager connection closed; retrying" : "manager not found; retrying");
           scheduleGodMicReconnect(opened ? 1500 : 2000);
         };
@@ -2358,6 +2408,9 @@
         conn.on("data", data=>{
           if(data && data.type === "manager-ready"){
             try{ conn.send({type:"listener-ready"}); }catch(_){ }
+          }
+          if(data && data.type === "mic-state"){
+            setIntercomDuck(data.live === true);
           }
         });
         conn.on("close", retryIfNeeded);
