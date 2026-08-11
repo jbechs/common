@@ -2324,7 +2324,7 @@
       const stamp = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
       intercomDiagnostics.textContent = `Intercom — ${msg} · ${stamp}`;
     }
-    const INTERCOM_HOST_ID = "common-god-mic-v1";
+    const INTERCOM_HOST_ID = "common-intercom-experiment-v1";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     let intercomPeer = null;
     let intercomConnection = null;
@@ -2391,7 +2391,7 @@
       try{
         if(intercomConnection){ try{ intercomConnection.close(); }catch(_){ } }
         intercomLog("attempting manager…");
-        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true, serialization:"json"});
+        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
         intercomConnection = conn;
         let opened = false;
         const retryIfNeeded = ()=>{
