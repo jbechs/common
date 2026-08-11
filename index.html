@@ -2168,6 +2168,13 @@
     });
 
     playButton.addEventListener("click", ()=>{
+      // Intercom receiver is intentionally armed from the participant's existing
+      // Begin gesture. This reproduces the user-gesture conditions of the known-good
+      // manual Listen experiment while remaining completely separate from sync logic.
+      if(!intercomReceiverStarted){
+        intercomLog("Begin gesture — arming receiver");
+        startGodMicReceiver();
+      }
       handlePrepare(false);
     });
     startNowButton.addEventListener("click", ()=>{
