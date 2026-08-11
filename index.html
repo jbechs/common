@@ -2446,14 +2446,16 @@
     updateTimingProbe();
   </script>
 
-<div id="isoIntercomBlue" style="display:none">
-  <div id="isoBlueStatus">Intercom ready</div>
+<div id="isoIntercomBlue" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
+  <button id="isoListenBtn" type="button" style="display:none">Listen</button>
+  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div>
 </div>
 <script>
 (() => {
   const CHANNEL = 'common-isolated-a584b0e44c2d';
+  const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
-  let peer = null, conn = null, call = null, started = false;
+  let peer = null, conn = null, call = null;
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
     audioEl = document.createElement("audio");
@@ -2463,12 +2465,12 @@
     audioEl.style.display = "none";
     document.body.appendChild(audioEl);
   }
-  const set = t => { if(status) status.textContent = t; };
-  window.startIsolatedIntercomListener = function(){
-    if(started || peer) return;
-    started = true;
+  const set = t => status.textContent = t;
+  btn.addEventListener("click", () => {
+    if(peer) return;
+    btn.disabled = true;
     set("Opening listener…");
-    if(!window.Peer){ set("PeerJS unavailable"); started=false; return; }
+    if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
     peer = new Peer();
     peer.on("open", () => {
       set("Listener open — connecting…");
@@ -2485,24 +2487,26 @@
       set("Media call received…");
       c.answer();
       c.on("stream", async stream => {
-        audioEl.srcObject = stream; 
+        audioEl.srcObject = stream;
         try{ await audioEl.play(); set("LIVE — receiving audio"); }
-        catch(e){ set("Audio play blocked"); }
+        catch(e){ set("Tap Listen again to play audio"); btn.disabled=false; }
       });
       c.on("close", () => set("Broadcast ended"));
     });
-    peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); started=false; peer=null; });
-  };
+    peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); btn.disabled=false; });
+  });
 })();
 </script>
+
 
 <script>
 (() => {
   const begin = document.getElementById("playButton");
-  if(begin){
+  const listen = document.getElementById("isoListenBtn");
+  if(begin && listen){
     begin.addEventListener("click", () => {
-      try{ if(typeof window.startIsolatedIntercomListener === "function") window.startIsolatedIntercomListener(); }catch(_e){}
-    }, true);
+      if(!listen.disabled) listen.click();
+    }, {once:true, capture:true});
   }
 })();
 </script>
