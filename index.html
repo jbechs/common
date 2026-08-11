@@ -213,6 +213,7 @@
     <audio id="preshowAudio" preload="auto" playsinline loop class="hidden"></audio>
   </main>
 
+  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script> 
     const AUDIO_URL = "https://eggtooth.xyz/common2audience.mp3";
     const PRESHOW_AUDIO_URL = "https://eggtooth.xyz/preshow.mp3";
@@ -2324,7 +2325,7 @@
     const intercomAudio = document.getElementById("intercomAudio");
     const intercomLive = document.getElementById("intercomLive");
     const intercomDiagnostics = document.getElementById("intercomDiagnostics");
-    const INTERCOM_HOST_ID = "common-v5-5f0a7d0dbb";
+    const INTERCOM_HOST_ID = "common-v5-4348238a9a34";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     const INTERCOM_DUCK_DB = 15;
     const INTERCOM_DUCK_FACTOR = Math.pow(10, -INTERCOM_DUCK_DB / 20);
@@ -2377,17 +2378,7 @@
     }
 
     function loadIntercomLibrary(){
-      if(window.Peer) return Promise.resolve();
-      if(intercomLibraryPromise) return intercomLibraryPromise;
-      intercomLibraryPromise = new Promise((resolve,reject)=>{
-        const script = document.createElement("script");
-        script.src = INTERCOM_PEERJS_SRC;
-        script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
-        document.head.appendChild(script);
-      });
-      return intercomLibraryPromise;
+      return window.Peer ? Promise.resolve() : Promise.reject(new Error("PeerJS unavailable"));
     }
 
     function scheduleIntercomReconnect(){
