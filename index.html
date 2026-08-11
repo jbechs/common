@@ -2485,7 +2485,7 @@
       set("Media call received…");
       c.answer();
       c.on("stream", async stream => {
-        audioEl.srcObject = stream;
+        audioEl.srcObject = stream; 
         try{ await audioEl.play(); set("LIVE — receiving audio"); }
         catch(e){ set("Audio play blocked"); }
       });
