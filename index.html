@@ -205,6 +205,7 @@
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
       <div id="intercomDiagnostics" class="timingProbe">Intercom — session not armed</div>
+      <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
 
@@ -2339,12 +2340,25 @@
   }
 
   window.armCommonIntercomSession = (value) => {
-    CHANNEL = intercomChannelForStartValue(value);
+    const requested = intercomChannelForStartValue(value);
+    let frozen = null;
+    try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
+
+    // If this tab has already armed a show session, preserve it across refresh/rejoin.
+    CHANNEL = frozen || requested;
+
+    if(CHANNEL && !frozen){
+      try{ sessionStorage.setItem(SESSION_KEY, CHANNEL); }catch(_e){}
+    }
+
+    if(sessionDiag) sessionDiag.textContent = "Session: " + (CHANNEL || "—");
     return CHANNEL;
   };
 
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
+  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
+  const SESSION_KEY = "common-v6-intercom-session";
   let peer = null, conn = null, call = null;
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
@@ -2356,6 +2370,10 @@
     document.body.appendChild(audioEl);
   }
   const set = t => status.textContent = t;
+  try{
+    const stored = sessionStorage.getItem(SESSION_KEY);
+    if(stored && sessionDiag) sessionDiag.textContent = "Session: " + stored;
+  }catch(_e){}
   btn.addEventListener("click", () => {
     if(peer) return;
     btn.disabled = true;
