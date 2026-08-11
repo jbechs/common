@@ -2626,7 +2626,13 @@
     startIntercomStats(c);
 
     c.on("stream", async stream => {
+      // Leave the silent autoplay-prime state and restore actual intercom level.
+      audioEl.pause();
+      audioEl.loop = false;
+      audioEl.volume = 1;
+      audioEl.src = "";
       audioEl.srcObject = stream;
+
       try{
         await audioEl.play();
         if(intercomLive) intercomLive.classList.add("active");
