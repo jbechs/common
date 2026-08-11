@@ -185,8 +185,7 @@
 
   <main class="container">
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
-    <button id="manualListenTest" type="button" style="margin-bottom:8px">Listen</button>
-    <div class="header">
+<div class="header">
       <h1>common</h1>
       <div class="subtitle">v5</div>
     </div>
@@ -2441,59 +2440,72 @@
     // Use Common's existing Begin gesture to unlock remote audio and arm the
     // proven receiver handshake before preshow. The sync preparation call is unchanged.
 
-    // TEMPORARY MANUAL GOLDEN LISTENER TEST
-    const manualListenTest = document.getElementById("manualListenTest");
-    let manualGoldenPeer = null;
-    let manualGoldenConn = null;
-    manualListenTest.addEventListener("click", ()=>{
-      if(manualGoldenPeer) return;
-      manualListenTest.disabled = true;
-      intercomLog("opening listener");
-      manualGoldenPeer = new Peer();
-      manualGoldenPeer.on("open", ()=>{
-        intercomLog("listener open · connecting");
-        manualGoldenConn = manualGoldenPeer.connect(INTERCOM_HOST_ID, {reliable:true});
-        manualGoldenConn.on("open", ()=>{
-          intercomLog("connected · waiting for live voice");
-          try{ manualGoldenConn.send({type:"listener-ready"}); }catch(_err){}
-        });
-        manualGoldenConn.on("data", data=>{
-          if(data && data.type === "mic-state") setIntercomDuck(data.live === true);
-        });
-        manualGoldenConn.on("error", err=> intercomLog("connection error: " + (err.type || err.message || "unknown")));
-        manualGoldenConn.on("close", ()=> intercomLog("connection closed"));
-      });
-      manualGoldenPeer.on("call", call=>{
-        intercomLog("media call received");
-        call.answer();
-        call.on("stream", async stream=>{
-          intercomAudio.srcObject = stream;
-          intercomAudio.removeAttribute("src");
-          intercomAudio.loop = false;
-          intercomAudio.volume = 1;
-          try{
-            await intercomAudio.play();
-            intercomLog("LIVE audio received");
-            intercomLive.classList.add("active");
-          }catch(err){
-            intercomLog("audio blocked: " + (err.name || err.message || "error"));
-          }
-        });
-        call.on("close", ()=>{
-          intercomLive.classList.remove("active");
-          setIntercomDuck(false);
-          intercomLog("broadcast ended");
-        });
-      });
-      manualGoldenPeer.on("error", err=>{
-        intercomLog("peer error: " + (err.type || err.message || "unknown"));
-        manualListenTest.disabled = false;
-      });
-    });
 
     updateTransport();
     updateDriftStats();
     updateTimingProbe();
   </script>
+
+<div id="isoIntercomBlue" style="display:none">
+  <div id="isoBlueStatus">Intercom ready</div>
+</div>
+<script>
+(() => {
+  const CHANNEL = 'common-isolated-a584b0e44c2d';
+  const status = document.getElementById("isoBlueStatus");
+  let peer = null, conn = null, call = null, started = false;
+  let audioEl = document.getElementById("isoRemoteAudio");
+  if(!audioEl){
+    audioEl = document.createElement("audio");
+    audioEl.id = "isoRemoteAudio";
+    audioEl.autoplay = true;
+    audioEl.playsInline = true;
+    audioEl.style.display = "none";
+    document.body.appendChild(audioEl);
+  }
+  const set = t => { if(status) status.textContent = t; };
+  window.startIsolatedIntercomListener = function(){
+    if(started || peer) return;
+    started = true;
+    set("Opening listener…");
+    if(!window.Peer){ set("PeerJS unavailable"); started=false; return; }
+    peer = new Peer();
+    peer.on("open", () => {
+      set("Listener open — connecting…");
+      conn = peer.connect(CHANNEL, {reliable:true});
+      conn.on("open", () => {
+        set("Connected — waiting for live voice…");
+        try{ conn.send({type:"listener-ready"}); }catch(_e){}
+      });
+      conn.on("error", e => set("Connection error: " + (e.type || e.message || "unknown")));
+      conn.on("close", () => set("Connection closed"));
+    });
+    peer.on("call", c => {
+      call = c;
+      set("Media call received…");
+      c.answer();
+      c.on("stream", async stream => {
+        audioEl.srcObject = stream;
+        try{ await audioEl.play(); set("LIVE — receiving audio"); }
+        catch(e){ set("Audio play blocked"); }
+      });
+      c.on("close", () => set("Broadcast ended"));
+    });
+    peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); started=false; peer=null; });
+  };
+})();
+</script>
+
+<script>
+(() => {
+  const begin = document.getElementById("playButton");
+  if(begin){
+    begin.addEventListener("click", () => {
+      try{ if(typeof window.startIsolatedIntercomListener === "function") window.startIsolatedIntercomListener(); }catch(_e){}
+    }, true);
+  }
+})();
+</script>
+
 </body>
 </html>
