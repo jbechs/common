@@ -2320,127 +2320,6 @@
 
 
 
-    // --- COMMON INTERCOM RECEIVER (golden handshake) ---------------------
-    // This is deliberately separate from Common's sync engine. It never reads
-    // or writes currentTime, playbackRate, the show clock, calibration, drift,
-    // seeking, or recovery logic. Networking is armed by the existing Begin tap.
-    const intercomAudio = document.getElementById("intercomAudio");
-    const intercomLive = document.getElementById("intercomLive");
-    const intercomDiagnostics = document.getElementById("intercomDiagnostics");
-    const INTERCOM_HOST_ID = "common-manual-c2954238e75e";
-    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
-    const INTERCOM_DUCK_DB = 15;
-    const INTERCOM_DUCK_FACTOR = Math.pow(10, -INTERCOM_DUCK_DB / 20);
-    const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
-
-    let intercomPeer = null;
-    let intercomConnection = null;
-    let intercomCall = null;
-    let intercomRetryTimer = null;
-    let intercomLibraryPromise = null;
-    let intercomStarted = false;
-    let intercomDuckActive = false;
-    let savedMainVolume = null;
-    let savedPreshowVolume = null;
-
-    function intercomLog(text){
-      if(intercomDiagnostics) intercomDiagnostics.textContent = `Intercom — ${text}`;
-    }
-
-    function unlockIntercomAudio(){
-      try{
-        intercomAudio.srcObject = null;
-        intercomAudio.src = SILENT_WAV;
-        intercomAudio.loop = true;
-        intercomAudio.volume = 0.0001;
-        const p = intercomAudio.play();
-        if(p && typeof p.catch === "function") p.catch(()=>{});
-        intercomLog("audio unlocked");
-      }catch(_err){}
-    }
-
-    function setIntercomDuck(live){
-      const next = live === true;
-      if(next === intercomDuckActive) return;
-      intercomDuckActive = next;
-      intercomLive.classList.toggle("active", next);
-      if(next){
-        savedMainVolume = audio.volume;
-        savedPreshowVolume = preshowAudio.volume;
-        audio.volume = Math.max(0, Math.min(1, audio.volume * INTERCOM_DUCK_FACTOR));
-        preshowAudio.volume = Math.max(0, Math.min(1, preshowAudio.volume * INTERCOM_DUCK_FACTOR));
-        intercomLog("LIVE · program -15 dB");
-      }else{
-        if(savedMainVolume != null) audio.volume = savedMainVolume;
-        if(savedPreshowVolume != null) preshowAudio.volume = savedPreshowVolume;
-        savedMainVolume = null;
-        savedPreshowVolume = null;
-        intercomLog("connected · broadcast muted");
-      }
-    }
-
-    function loadIntercomLibrary(){
-      return window.Peer ? Promise.resolve() : Promise.reject(new Error("PeerJS unavailable"));
-    }
-
-    function scheduleIntercomReconnect(){
-      clearTimeout(intercomRetryTimer);
-      intercomRetryTimer = setTimeout(connectIntercomToManager, 2000);
-    }
-
-    function connectIntercomToManager(){
-      if(!intercomPeer || intercomPeer.destroyed || !intercomPeer.open) return;
-      try{
-        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
-        intercomConnection = conn;
-        intercomLog("attempting manager");
-        conn.on("open", ()=>{
-          intercomLog("connected · waiting for broadcast");
-          try{ conn.send({type:"listener-ready"}); }catch(_err){}
-        });
-        conn.on("data", data=>{
-          if(data && data.type === "mic-state") setIntercomDuck(data.live === true);
-        });
-        conn.on("close", ()=>{ setIntercomDuck(false); scheduleIntercomReconnect(); });
-        conn.on("error", ()=> scheduleIntercomReconnect());
-      }catch(_err){ scheduleIntercomReconnect(); }
-    }
-
-    async function startIntercomReceiver(){
-      if(intercomStarted) return;
-      intercomStarted = true;
-      try{
-        await loadIntercomLibrary();
-        intercomPeer = new Peer();
-        intercomPeer.on("open", ()=> connectIntercomToManager());
-        intercomPeer.on("call", call=>{
-          if(intercomCall){ try{ intercomCall.close(); }catch(_err){} }
-          intercomCall = call;
-          call.answer();
-          call.on("stream", async stream=>{
-            intercomAudio.srcObject = stream;
-            intercomAudio.removeAttribute("src");
-            intercomAudio.loop = false;
-            intercomAudio.volume = 1;
-            try{ await intercomAudio.play(); intercomLog("LIVE audio received"); }
-            catch(err){ intercomLog(`audio blocked: ${err.name || "error"}`); }
-          });
-          call.on("close", ()=>{ setIntercomDuck(false); scheduleIntercomReconnect(); });
-        });
-        intercomPeer.on("error", err=>{
-          if(err && err.type === "peer-unavailable") scheduleIntercomReconnect();
-          else intercomLog(`peer error: ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`);
-        });
-      }catch(err){
-        intercomStarted = false;
-        intercomLog(`unavailable: ${err.message || "unknown"}`);
-      }
-    }
-
-    // Use Common's existing Begin gesture to unlock remote audio and arm the
-    // proven receiver handshake before preshow. The sync preparation call is unchanged.
-
-
     updateTransport();
     updateDriftStats();
     updateTimingProbe();
@@ -2499,12 +2378,28 @@
 </script>
 
 
+
+
+
 <script>
 (() => {
   const begin = document.getElementById("playButton");
   const listen = document.getElementById("isoListenBtn");
+  const remote = document.getElementById("isoRemoteAudio");
+  const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
   if(begin && listen){
     begin.addEventListener("click", () => {
+      // Preserve user activation for future remote audio playback.
+      if(remote){
+        try{
+          remote.srcObject = null;
+          remote.src = SILENT_WAV;
+          remote.loop = true;
+          remote.volume = 0.0001;
+          const p = remote.play();
+          if(p && typeof p.catch === "function") p.catch(()=>{});
+        }catch(_e){}
+      }
       if(!listen.disabled) listen.click();
     }, {once:true, capture:true});
   }
