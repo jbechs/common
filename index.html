@@ -15,7 +15,9 @@
       min-height:100vh;
       display:grid;
       place-items:center;
-      background:#111;
+      background:#071426;
+      background-image:radial-gradient(circle at 50% 42%, #102d50 0%, #0a1d35 48%, #030914 100%);
+      background-attachment:fixed;
       color:#fff;
       font-family:'Inter', system-ui, sans-serif;
     }
@@ -57,7 +59,7 @@
     }
 
     input{
-      background:#222;
+      background:#10223a;
       color:#fff;
     }
 
@@ -109,8 +111,8 @@
       min-width:0;
       padding:8px 12px;
       border-radius:6px;
-      background:#131313;
-      color:#242424;
+      background:#071426;
+      color:#163454;
       font-size:.72rem;
       font-weight:400;
       letter-spacing:.03em;
@@ -134,72 +136,6 @@
     }
 
 
-    /* --- INTERCOM EXPERIMENT -------------------------------------------
-       Completely dormant unless the hidden label is triple-tapped.
-       This layer never reads or writes Common's show clock, sync state,
-       playbackRate, currentTime, drift correction, or main audio element.
-    ------------------------------------------------------------------- */
-    .intercomLabel{
-      width:100%;
-      padding:2px 0 5px;
-      border:0;
-      background:transparent;
-      color:#090909;
-      font-size:.62rem;
-      font-weight:400;
-      letter-spacing:.08em;
-      text-transform:lowercase;
-      cursor:default;
-      -webkit-tap-highlight-color:transparent;
-      user-select:none;
-    }
-
-    .intercomPanel{
-      display:grid;
-      gap:8px;
-      padding:12px;
-      border:1px solid #222;
-      border-radius:8px;
-      background:#0b0b0b;
-    }
-
-    .intercomPanel.hidden{ display:none; }
-
-    .intercomTitle{
-      color:#777;
-      font-size:.72rem;
-      letter-spacing:.08em;
-      text-transform:uppercase;
-    }
-
-    .intercomStatus{
-      color:#aaa;
-      font-size:.78rem;
-      line-height:1.35;
-      min-height:1.1em;
-    }
-
-    .intercomControls{
-      display:grid;
-      grid-template-columns:1fr 1fr;
-      gap:8px;
-    }
-
-    .intercomControls button{
-      padding:10px 8px;
-      border-radius:7px;
-      background:#141414;
-      color:#aaa;
-      border:1px solid #242424;
-      font-size:.78rem;
-    }
-
-    .intercomControls button.live{
-      color:#fff;
-      border-color:#555;
-      background:#202020;
-    }
-
     .hidden{
       display:none;
     }
@@ -210,7 +146,7 @@
 
     input[type="datetime-local"]{
       color:#fff;
-      background:#222;
+      background:#10223a;
     }
 
     input[type="datetime-local"]::-webkit-calendar-picker-indicator{
@@ -224,7 +160,6 @@
 <body>
 
   <main class="container">
-    <button id="intercomLabel" class="intercomLabel" type="button" aria-label="Intercom experiment">intercom</button>
     <div class="header">
       <h1>common</h1>
       <div class="subtitle">v4.98 sync engine</div>
@@ -246,17 +181,6 @@
       <div id="debug" class="debug"></div>
     </div>
 
-
-    <div id="intercomPanel" class="intercomPanel hidden" aria-hidden="true">
-      <div class="intercomTitle">intercom experiment</div>
-      <div id="intercomStatus" class="intercomStatus">Dormant — Common sync untouched.</div>
-      <div class="intercomControls">
-        <button id="intercomListen" type="button">Listen</button>
-        <button id="intercomBroadcast" type="button">Broadcast</button>
-        <button id="intercomStop" type="button">Stop intercom</button>
-        <button id="intercomClose" type="button">Close panel</button>
-      </div>
-    </div>
 
     <audio id="audio" preload="auto" playsinline class="hidden"></audio>
     <audio id="intercomAudio" autoplay playsinline class="hidden"></audio>
@@ -1597,7 +1521,88 @@
         }, 3000);
 
         setStatus(reason);
-        updateTransport();
+    
+
+    // --- COMMON GOD-MIC RECEIVER -----------------------------------------
+    // Receiver-only layer. It is intentionally isolated from the v4.98 sync
+    // engine and does not initialize until AFTER the main performance audio is
+    // already playing. It never reads/writes the show clock, currentTime,
+    // playbackRate, drift controller, hard seeks, calibration, or recovery.
+    const intercomAudio = document.getElementById("intercomAudio");
+    const INTERCOM_HOST_ID = "common-god-mic-v1";
+    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
+    let intercomPeer = null;
+    let intercomConnection = null;
+    let intercomCall = null;
+    let intercomRetryTimer = null;
+    let intercomLibraryPromise = null;
+    let intercomReceiverStarted = false;
+
+    function loadIntercomLibrary(){
+      if(window.Peer) return Promise.resolve();
+      if(intercomLibraryPromise) return intercomLibraryPromise;
+      intercomLibraryPromise = new Promise((resolve,reject)=>{
+        const script = document.createElement("script");
+        script.src = INTERCOM_PEERJS_SRC;
+        script.async = true;
+        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
+        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
+        document.head.appendChild(script);
+      });
+      return intercomLibraryPromise;
+    }
+
+    function scheduleGodMicReconnect(delay=2000){
+      clearTimeout(intercomRetryTimer);
+      intercomRetryTimer = setTimeout(connectGodMic, delay);
+    }
+
+    function connectGodMic(){
+      if(!intercomPeer || intercomPeer.destroyed || !intercomPeer.open) return;
+      try{
+        if(intercomConnection){ try{ intercomConnection.close(); }catch(_){ } }
+        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
+        intercomConnection = conn;
+        conn.on("open", ()=>{ try{ conn.send({type:"listener-ready"}); }catch(_){ } });
+        conn.on("close", ()=> scheduleGodMicReconnect());
+        conn.on("error", ()=> scheduleGodMicReconnect());
+      }catch(_){ scheduleGodMicReconnect(); }
+    }
+
+    async function startGodMicReceiver(){
+      if(intercomReceiverStarted) return;
+      intercomReceiverStarted = true;
+      try{
+        await loadIntercomLibrary();
+        intercomPeer = new Peer();
+        intercomPeer.on("open", ()=> connectGodMic());
+        intercomPeer.on("call", call=>{
+          if(intercomCall){ try{ intercomCall.close(); }catch(_){ } }
+          intercomCall = call;
+          call.answer(); // receiver sends no microphone stream
+          call.on("stream", async stream=>{
+            intercomAudio.srcObject = stream;
+            try{ await intercomAudio.play(); }catch(_){ }
+          });
+          call.on("close", ()=> scheduleGodMicReconnect());
+        });
+        intercomPeer.on("error", err=>{
+          if(err && err.type === "peer-unavailable") scheduleGodMicReconnect();
+        });
+      }catch(_){
+        // God mic is optional. Common itself continues untouched.
+        intercomReceiverStarted = false;
+        scheduleGodMicReconnect(3000);
+      }
+    }
+
+    // Protect startup calibration: arm the optional receiver only after the
+    // synchronized main track has actually entered playback and settled briefly.
+    audio.addEventListener("playing", ()=>{
+      if(!intercomReceiverStarted) setTimeout(startGodMicReceiver, 2500);
+    });
+
+    updateTransport();
         updateDriftStats();
         return true;
       }else{
@@ -2367,255 +2372,10 @@
 
 
 
-    // --- INTERCOM EXPERIMENT ---------------------------------------------
-    // IMPORTANT: intentionally isolated from the Common synchronization core.
-    // Nothing below references or mutates audio.currentTime, playbackRate,
-    // scheduledAnchorMs, clock calibration, drift correction, hard seeks,
-    // interruption recovery, or any playback monitor.
-    //
-    // The PeerJS client is loaded lazily ONLY after the hidden label is
-    // triple-tapped, so ordinary Common sessions do not initialize this layer.
-    const intercomLabel = document.getElementById("intercomLabel");
-    const intercomPanel = document.getElementById("intercomPanel");
-    const intercomStatus = document.getElementById("intercomStatus");
-    const intercomListen = document.getElementById("intercomListen");
-    const intercomBroadcast = document.getElementById("intercomBroadcast");
-    const intercomStop = document.getElementById("intercomStop");
-    const intercomClose = document.getElementById("intercomClose");
-    const intercomAudio = document.getElementById("intercomAudio");
-
-    const INTERCOM_HOST_ID = "common-intercom-experiment-v1";
-    const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
-
-    let intercomTapCount = 0;
-    let intercomTapTimer = null;
-    let intercomPeer = null;
-    let intercomMode = null;
-    let intercomMicStream = null;
-    let intercomRetryTimer = null;
-    let intercomCalls = new Map();
-    let intercomListenerConnection = null;
-    let intercomLibraryPromise = null;
-
-    function setIntercomStatus(text){
-      intercomStatus.textContent = text;
-    }
-
-    function openIntercomPanel(){
-      intercomPanel.classList.remove("hidden");
-      intercomPanel.setAttribute("aria-hidden", "false");
-      setIntercomStatus("Dormant — choose Listen or Broadcast. Common sync remains untouched.");
-    }
-
-    function closeIntercomPanel(){
-      intercomPanel.classList.add("hidden");
-      intercomPanel.setAttribute("aria-hidden", "true");
-    }
-
-    intercomLabel.addEventListener("click", ()=>{
-      intercomTapCount += 1;
-      clearTimeout(intercomTapTimer);
-      if(intercomTapCount >= 3){
-        intercomTapCount = 0;
-        openIntercomPanel();
-        return;
-      }
-      intercomTapTimer = setTimeout(()=>{ intercomTapCount = 0; }, 900);
-    });
-
-    function loadIntercomLibrary(){
-      if(window.Peer) return Promise.resolve();
-      if(intercomLibraryPromise) return intercomLibraryPromise;
-      intercomLibraryPromise = new Promise((resolve,reject)=>{
-        const script = document.createElement("script");
-        script.src = INTERCOM_PEERJS_SRC;
-        script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
-        document.head.appendChild(script);
-      });
-      return intercomLibraryPromise;
-    }
-
-    function clearIntercomRetry(){
-      if(intercomRetryTimer){
-        clearTimeout(intercomRetryTimer);
-        intercomRetryTimer = null;
-      }
-    }
-
-    function destroyIntercomPeer(){
-      clearIntercomRetry();
-      if(intercomListenerConnection){
-        try{ intercomListenerConnection.close(); }catch(_){ }
-        intercomListenerConnection = null;
-      }
-      for(const call of intercomCalls.values()){
-        try{ call.close(); }catch(_){ }
-      }
-      intercomCalls.clear();
-      if(intercomPeer){
-        try{ intercomPeer.destroy(); }catch(_){ }
-        intercomPeer = null;
-      }
-    }
-
-    function stopIntercom(){
-      intercomMode = null;
-      destroyIntercomPeer();
-      if(intercomMicStream){
-        for(const track of intercomMicStream.getTracks()) track.stop();
-        intercomMicStream = null;
-      }
-      try{
-        intercomAudio.pause();
-        intercomAudio.srcObject = null;
-      }catch(_){ }
-      intercomBroadcast.classList.remove("live");
-      intercomListen.classList.remove("live");
-      setIntercomStatus("Intercom stopped. Common playback was not altered.");
-    }
-
-    async function startIntercomListener(){
-      stopIntercom();
-      intercomMode = "listener";
-      intercomListen.classList.add("live");
-      setIntercomStatus("Loading listener…");
-      try{
-        await loadIntercomLibrary();
-        if(intercomMode !== "listener") return;
-        intercomPeer = new Peer();
-
-        intercomPeer.on("open", ()=>{
-          if(intercomMode !== "listener") return;
-          connectListenerToHost();
-        });
-
-        intercomPeer.on("call", call=>{
-          if(intercomMode !== "listener") return call.close();
-          call.answer(); // one-way: listener sends no microphone stream
-          intercomCalls.set(call.peer, call);
-          call.on("stream", async stream=>{
-            intercomAudio.srcObject = stream;
-            try{
-              await intercomAudio.play();
-              setIntercomStatus("LIVE — receiving intercom audio.");
-            }catch(_){
-              setIntercomStatus("Intercom connected — tap Listen once more if sound is blocked.");
-            }
-          });
-          call.on("close", ()=>{
-            intercomCalls.delete(call.peer);
-            if(intercomMode === "listener") setIntercomStatus("Broadcaster disconnected — reconnecting…");
-          });
-        });
-
-        intercomPeer.on("error", err=>{
-          if(intercomMode !== "listener") return;
-          if(err && err.type === "peer-unavailable"){
-            setIntercomStatus("Waiting for broadcaster…");
-            scheduleListenerReconnect();
-          }else{
-            setIntercomStatus(`Listener error: ${err.type || err.message || "unknown"}`);
-          }
-        });
-      }catch(err){
-        setIntercomStatus(`Intercom unavailable: ${err.message}`);
-      }
-    }
-
-    function connectListenerToHost(){
-      if(intercomMode !== "listener" || !intercomPeer || intercomPeer.destroyed) return;
-      clearIntercomRetry();
-      try{
-        const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true});
-        intercomListenerConnection = conn;
-        conn.on("open", ()=>{
-          setIntercomStatus("Connected — waiting for live voice…");
-          try{ conn.send({type:"listener-ready"}); }catch(_){ }
-        });
-        conn.on("close", ()=>{
-          if(intercomMode === "listener"){
-            setIntercomStatus("Broadcaster unavailable — retrying…");
-            scheduleListenerReconnect();
-          }
-        });
-        conn.on("error", ()=> scheduleListenerReconnect());
-      }catch(_){
-        scheduleListenerReconnect();
-      }
-    }
-
-    function scheduleListenerReconnect(){
-      if(intercomMode !== "listener") return;
-      clearIntercomRetry();
-      intercomRetryTimer = setTimeout(()=>{
-        if(intercomMode === "listener") connectListenerToHost();
-      }, 2000);
-    }
-
-    async function startIntercomBroadcast(){
-      stopIntercom();
-      intercomMode = "broadcast";
-      intercomBroadcast.classList.add("live");
-      setIntercomStatus("Requesting microphone…");
-      try{
-        // Echo cancellation/noise suppression make spoken intercom testing easier.
-        // This MediaStream is entirely separate from Common's <audio> element.
-        intercomMicStream = await navigator.mediaDevices.getUserMedia({
-          audio:{ echoCancellation:true, noiseSuppression:true, autoGainControl:true },
-          video:false
-        });
-        await loadIntercomLibrary();
-        if(intercomMode !== "broadcast") return;
-
-        intercomPeer = new Peer(INTERCOM_HOST_ID);
-        intercomPeer.on("open", ()=>{
-          setIntercomStatus("LIVE MIC — waiting for listeners.");
-        });
-
-        intercomPeer.on("connection", conn=>{
-          conn.on("open", ()=>{
-            if(intercomMode !== "broadcast" || !intercomMicStream) return;
-            const call = intercomPeer.call(conn.peer, intercomMicStream);
-            intercomCalls.set(conn.peer, call);
-            call.on("close", ()=> intercomCalls.delete(conn.peer));
-            setIntercomStatus(`LIVE MIC — ${intercomCalls.size} listener${intercomCalls.size === 1 ? "" : "s"}.`);
-          });
-        });
-
-        intercomPeer.on("error", err=>{
-          if(intercomMode !== "broadcast") return;
-          if(err && err.type === "unavailable-id"){
-            setIntercomStatus("Another broadcaster already owns this test channel.");
-          }else{
-            setIntercomStatus(`Broadcast error: ${err.type || err.message || "unknown"}`);
-          }
-        });
-      }catch(err){
-        if(intercomMicStream){
-          for(const track of intercomMicStream.getTracks()) track.stop();
-          intercomMicStream = null;
-        }
-        intercomBroadcast.classList.remove("live");
-        setIntercomStatus(`Could not start mic: ${err.message}`);
-      }
-    }
-
-    intercomListen.addEventListener("click", ()=>{
-      if(intercomMode === "listener" && intercomAudio.srcObject){
-        intercomAudio.play().catch(()=>{});
-      }else{
-        startIntercomListener();
-      }
-    });
-    intercomBroadcast.addEventListener("click", startIntercomBroadcast);
-    intercomStop.addEventListener("click", stopIntercom);
-    intercomClose.addEventListener("click", closeIntercomPanel);
-
     updateTransport();
     updateDriftStats();
     updateTimingProbe();
   </script>
 </body>
 </html>
+
