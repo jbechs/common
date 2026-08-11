@@ -2327,11 +2327,11 @@
 
 <div id="isoIntercomBlue" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
   <button id="isoListenBtn" type="button" style="display:none">Listen</button>
-  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div>
+  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div><div style="font-size:.68rem;opacity:.45;margin-top:4px">BUILD proof-bb466b8b · common-proof-121a9edb438d</div>
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-diag-730fc8d668bd';
+  const CHANNEL = 'common-proof-121a9edb438d';
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   let peer = null, conn = null, call = null;
@@ -2355,7 +2355,7 @@
     const connectToManager = () => {
       if(!peer || peer.destroyed || !peer.open) return;
       if(conn && conn.open) return;
-      set("Listener open — connecting…");
+      set("Listener open — connecting to common-proof-121a9edb438d…");
       try{
         conn = peer.connect(CHANNEL, {reliable:true});
         conn.on("open", () => {
