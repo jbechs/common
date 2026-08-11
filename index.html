@@ -2415,10 +2415,6 @@
   let lastJbDelay = null;
   let lastJbCount = null;
 
-  let liveWatchdogTimer = null;
-  let liveLastPackets = null;
-  let liveLastAdvanceMs = 0;
-
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
     audioEl = document.createElement("audio");
@@ -2536,53 +2532,6 @@
   }
 
 
-
-  function setIntercomLive(active){
-    if(intercomLive) intercomLive.classList.toggle("active", !!active);
-  }
-
-  function stopLiveWatchdog(){
-    if(liveWatchdogTimer) clearInterval(liveWatchdogTimer);
-    liveWatchdogTimer = null;
-    liveLastPackets = null;
-    liveLastAdvanceMs = 0;
-  }
-
-  async function sampleLivePackets(c){
-    const pc = c && c.peerConnection;
-    if(!pc || typeof pc.getStats !== "function") return;
-
-    try{
-      const report = await pc.getStats();
-      let packets = null;
-      report.forEach(stat => {
-        if(stat.type === "inbound-rtp" &&
-           stat.kind === "audio" &&
-           !stat.isRemote &&
-           Number.isFinite(stat.packetsReceived)){
-          packets = stat.packetsReceived;
-        }
-      });
-
-      if(packets == null) return;
-
-      if(liveLastPackets == null || packets > liveLastPackets){
-        liveLastPackets = packets;
-        liveLastAdvanceMs = Date.now();
-        setIntercomLive(true);
-      }else if(liveLastAdvanceMs && Date.now() - liveLastAdvanceMs > 2500){
-        setIntercomLive(false);
-      }
-    }catch(_e){}
-  }
-
-  function startLiveWatchdog(c){
-    stopLiveWatchdog();
-    liveLastAdvanceMs = Date.now();
-    sampleLivePackets(c);
-    liveWatchdogTimer = setInterval(() => sampleLivePackets(c), 750);
-  }
-
   function stopIntercomStats(){
     if(intercomStatsTimer) clearInterval(intercomStatsTimer);
     intercomStatsTimer = null;
@@ -2695,21 +2644,11 @@
       audioEl.src = "";
       audioEl.srcObject = stream;
 
-      const track = stream.getAudioTracks && stream.getAudioTracks()[0];
-      if(track){
-        track.addEventListener("ended", () => setIntercomLive(false), {once:true});
-        track.addEventListener("mute", () => setIntercomLive(false));
-        track.addEventListener("unmute", () => setIntercomLive(true));
-      }
-
-      startLiveWatchdog(c);
-
       try{
         await audioEl.play();
-        setIntercomLive(true);
+        if(intercomLive) intercomLive.classList.add("active");
         set("LIVE — receiving audio");
       }catch(_e){
-        setIntercomLive(false);
         set("LIVE — audio waiting for user gesture");
       }
     });
@@ -2717,9 +2656,8 @@
     const finish = () => {
       if(call === c) call = null;
       stopIntercomStats();
-      stopLiveWatchdog();
-      setIntercomLive(false);
       if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — broadcast ended";
+      if(intercomLive) intercomLive.classList.remove("active");
       try{
         audioEl.pause();
         audioEl.srcObject = null;
