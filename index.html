@@ -179,6 +179,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
+      <div id="intercomDiagnostics" class="debug" style="margin-top:10px; white-space:pre-wrap;">Intercom — dormant</div>
     </div>
 
 
@@ -2299,6 +2300,11 @@
     // already playing. It never reads/writes the show clock, currentTime,
     // playbackRate, drift controller, hard seeks, calibration, or recovery.
     const intercomAudio = document.getElementById("intercomAudio");
+    const intercomDiagnostics = document.getElementById("intercomDiagnostics");
+    function intercomLog(msg){
+      const stamp = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+      intercomDiagnostics.textContent = `Intercom — ${msg} · ${stamp}`;
+    }
     const INTERCOM_HOST_ID = "common-god-mic-v1";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     let intercomPeer = null;
@@ -2309,14 +2315,15 @@
     let intercomReceiverStarted = false;
 
     function loadIntercomLibrary(){
-      if(window.Peer) return Promise.resolve();
+      if(window.Peer){ intercomLog("PeerJS already loaded"); return Promise.resolve(); }
       if(intercomLibraryPromise) return intercomLibraryPromise;
+      intercomLog("loading PeerJS…");
       intercomLibraryPromise = new Promise((resolve,reject)=>{
         const script = document.createElement("script");
         script.src = INTERCOM_PEERJS_SRC;
         script.async = true;
-        script.onload = ()=> window.Peer ? resolve() : reject(new Error("PeerJS unavailable"));
-        script.onerror = ()=> reject(new Error("Could not load intercom network library"));
+        script.onload = ()=> { if(window.Peer){ intercomLog("PeerJS loaded"); resolve(); } else { intercomLog("PeerJS unavailable"); reject(new Error("PeerJS unavailable")); } };
+        script.onerror = ()=> { intercomLog("PeerJS load failed"); reject(new Error("Could not load intercom network library")); };
         document.head.appendChild(script);
       });
       return intercomLibraryPromise;
@@ -2329,19 +2336,23 @@
 
     function connectGodMic(){
       if(!intercomPeer || intercomPeer.destroyed || !intercomPeer.open){
+        intercomLog("waiting for local peer…");
         return scheduleGodMicReconnect(1000);
       }
       try{
         if(intercomConnection){ try{ intercomConnection.close(); }catch(_){ } }
+        intercomLog("attempting manager…");
         const conn = intercomPeer.connect(INTERCOM_HOST_ID, {reliable:true, serialization:"json"});
         intercomConnection = conn;
         let opened = false;
         const retryIfNeeded = ()=>{
           if(intercomConnection === conn) intercomConnection = null;
+          intercomLog(opened ? "manager connection closed; retrying" : "manager not found; retrying");
           scheduleGodMicReconnect(opened ? 1500 : 2000);
         };
         conn.on("open", ()=>{
           opened = true;
+          intercomLog("manager connection open");
           try{ conn.send({type:"listener-ready"}); }catch(_){ }
         });
         conn.on("data", data=>{
@@ -2358,27 +2369,31 @@
       if(intercomReceiverStarted) return;
       intercomReceiverStarted = true;
       try{
+        intercomLog("receiver arming");
         await loadIntercomLibrary();
         intercomPeer = new Peer();
-        intercomPeer.on("open", ()=> connectGodMic());
+        intercomPeer.on("open", id=>{ intercomLog(`receiver peer open ${id}`); connectGodMic(); });
         intercomPeer.on("call", call=>{
+          intercomLog("media call received");
           if(intercomCall){ try{ intercomCall.close(); }catch(_){ } }
           intercomCall = call;
           call.answer(); // receiver sends no microphone stream
           call.on("stream", async stream=>{
             intercomAudio.srcObject = stream;
-            try{ await intercomAudio.play(); }catch(_){ }
+            try{ await intercomAudio.play(); intercomLog("LIVE audio received"); }catch(err){ intercomLog(`audio play blocked: ${err && err.name ? err.name : "error"}`); }
           });
           call.on("close", ()=> scheduleGodMicReconnect());
         });
         intercomPeer.on("error", err=>{
+          intercomLog(`peer error: ${err && (err.type || err.message) ? (err.type || err.message) : "unknown"}`);
           if(err && err.type === "peer-unavailable") scheduleGodMicReconnect();
         });
         intercomPeer.on("disconnected", ()=>{
           try{ intercomPeer.reconnect(); }catch(_){ }
           scheduleGodMicReconnect(1500);
         });
-      }catch(_){
+      }catch(err){
+        intercomLog(`receiver start failed: ${err && err.message ? err.message : "unknown"}`);
         // God mic is optional. Common itself continues untouched.
         intercomReceiverStarted = false;
         scheduleGodMicReconnect(3000);
