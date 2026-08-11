@@ -2367,12 +2367,6 @@
            now <= (startMs + SESSION_LATE_MS);
   }
 
-  function storedSessionIsActuallyUnderway(snapshot){
-    if(!storedSessionIsLive(snapshot)) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    return Number.isFinite(startMs) && Date.now() >= startMs;
-  }
-
   function clearStoredIntercomSession(){
     try{
       sessionStorage.removeItem(SESSION_KEY);
@@ -2425,6 +2419,85 @@
   let liveLastPackets = null;
   let liveLastAdvanceMs = 0;
 
+  let managerBroadcastActive = false;
+  let managerBroadcastStateKnown = false;
+
+  // Audience-facing broadcast duck: -25 dB total relative to the soundtrack's
+  // current level. This intentionally restores the earlier deep "dunk" behavior
+  // that fell out during the persistent-intercom rewrite.
+  const INTERCOM_DUCK_DB = -25;
+  const INTERCOM_DUCK_FACTOR = Math.pow(10, INTERCOM_DUCK_DB / 20);
+  const DUCK_DOWN_MS = 120;
+  const DUCK_UP_MS = 180;
+  let duckAnimationFrame = null;
+  let ducked = false;
+  let duckRestoreLevels = null;
+
+  function activeProgramAudioElements(){
+    return [
+      document.getElementById("audio"),
+      document.getElementById("preshowAudio")
+    ].filter(Boolean);
+  }
+
+  function cancelDuckAnimation(){
+    if(duckAnimationFrame) cancelAnimationFrame(duckAnimationFrame);
+    duckAnimationFrame = null;
+  }
+
+  function animateVolumes(targets, durationMs){
+    cancelDuckAnimation();
+    const started = performance.now();
+    const starts = targets.map(({el}) => el.volume);
+
+    const step = now => {
+      const p = Math.min(1, (now - started) / durationMs);
+      targets.forEach(({el, volume}, i) => {
+        const from = starts[i];
+        el.volume = from + (volume - from) * p;
+      });
+
+      if(p < 1){
+        duckAnimationFrame = requestAnimationFrame(step);
+      }else{
+        duckAnimationFrame = null;
+      }
+    };
+
+    duckAnimationFrame = requestAnimationFrame(step);
+  }
+
+  function setSoundtrackDucked(active){
+    const els = activeProgramAudioElements();
+
+    if(active){
+      if(ducked) return;
+      ducked = true;
+      duckRestoreLevels = new Map();
+
+      const targets = els.map(el => {
+        const base = el.volume;
+        duckRestoreLevels.set(el, base);
+        return {el, volume: Math.max(0, Math.min(1, base * INTERCOM_DUCK_FACTOR))};
+      });
+
+      animateVolumes(targets, DUCK_DOWN_MS);
+    }else{
+      if(!ducked) return;
+      ducked = false;
+
+      const targets = els.map(el => ({
+        el,
+        volume: duckRestoreLevels && duckRestoreLevels.has(el)
+          ? duckRestoreLevels.get(el)
+          : el.volume
+      }));
+
+      animateVolumes(targets, DUCK_UP_MS);
+      duckRestoreLevels = null;
+    }
+  }
+
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
     audioEl = document.createElement("audio");
@@ -2444,19 +2517,19 @@
     const requested = intercomChannelForStartValue(value);
     const snapshot = storedSessionSnapshot();
 
-    let wasArmed = false;
-    try{ wasArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1"; }catch(_e){}
-
-    // Visible Start Time is authoritative. Only a genuine mid-show rejoin may
-    // override it with a previously armed session.
-    if(wasArmed && storedSessionIsActuallyUnderway(snapshot)){
+    if(intercomStartDirty){
+      // Deliberate Start Time edit = deliberate new performance/session.
+      sessionId = requested;
+      if(sessionId) saveIntercomSession(sessionId, value);
+    }else if(storedSessionIsLive(snapshot)){
+      // Refresh/rejoin during the current show's recovery window.
       sessionId = snapshot.id;
       if(startField && snapshot.startValue && startField.value !== snapshot.startValue){
         startField.value = snapshot.startValue;
       }
       if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
     }else{
-      // Setup/new run: what the audience/operator sees is what Begin will use.
+      // Old performance is outside the rejoin window; current field starts a new room.
       clearStoredIntercomSession();
       sessionId = requested;
       if(sessionId) saveIntercomSession(sessionId, value);
@@ -2575,7 +2648,9 @@
       if(liveLastPackets == null || packets > liveLastPackets){
         liveLastPackets = packets;
         liveLastAdvanceMs = Date.now();
-        setIntercomLive(true);
+        // Persistent muted calls continue to carry RTP. The Manager's explicit
+        // broadcast-state message is authoritative for the audience-facing LIVE badge.
+        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
       }else if(liveLastAdvanceMs && Date.now() - liveLastAdvanceMs > 2500){
         setIntercomLive(false);
       }
@@ -2712,16 +2787,21 @@
 
       try{
         await audioEl.play();
-        setIntercomLive(true);
-        set("LIVE — receiving audio");
+        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
+        set(managerBroadcastActive
+          ? "LIVE — receiving audio"
+          : "Intercom media ready · waiting for broadcast");
       }catch(_e){
         setIntercomLive(false);
-        set("LIVE — audio waiting for user gesture");
+        set("Intercom audio waiting for user gesture");
       }
     });
 
     const finish = () => {
       if(call === c) call = null;
+      managerBroadcastActive = false;
+      managerBroadcastStateKnown = false;
+      setSoundtrackDucked(false);
       stopIntercomStats();
       stopLiveWatchdog();
       setIntercomLive(false);
@@ -2749,6 +2829,35 @@
     });
 
     peer.on("call", attachCallHandlers);
+
+    peer.on("connection", controlConn => {
+      controlConn.on("data", data => {
+        if(!data || data.type !== "broadcast-state") return;
+        managerBroadcastStateKnown = true;
+        managerBroadcastActive = !!data.active;
+        setIntercomLive(managerBroadcastActive);
+        setSoundtrackDucked(managerBroadcastActive);
+
+        if(managerBroadcastActive){
+          set("LIVE — receiving audio");
+        }else{
+          set("Receiver registered · manager online");
+        }
+      });
+
+      controlConn.on("close", () => {
+        // Media may remain alive through signaling churn; avoid showing stale LIVE.
+        managerBroadcastActive = false;
+        setIntercomLive(false);
+        setSoundtrackDucked(false);
+      });
+
+      controlConn.on("error", () => {
+        managerBroadcastActive = false;
+        setIntercomLive(false);
+        setSoundtrackDucked(false);
+      });
+    });
 
     peer.on("disconnected", () => {
       set("Receiver signaling reconnecting…");
@@ -2780,6 +2889,7 @@
         sessionStorage.removeItem(BLUE_ARMED_KEY);
       }catch(_e){}
       sessionId = null;
+      setSoundtrackDucked(false);
       if(sessionDiag) sessionDiag.textContent = "Session: —";
       const baseDiag = document.getElementById("intercomDiagnostics");
       if(baseDiag) baseDiag.textContent = "Intercom — show ended";
@@ -2789,12 +2899,6 @@
 
   if(begin && btn){
     begin.addEventListener("click", () => {
-      try{
-        const snapshot = storedSessionSnapshot();
-        if(snapshot.startValue && startField && startField.value !== snapshot.startValue){
-          sessionStorage.removeItem(BLUE_ARMED_KEY);
-        }
-      }catch(_e){}
       const armed = freezeSession(startField && startField.value);
       const baseDiag = document.getElementById("intercomDiagnostics");
       if(baseDiag) baseDiag.textContent = armed
