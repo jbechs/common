@@ -205,6 +205,7 @@
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
       <div id="intercomDiagnostics" class="timingProbe">Intercom — session not armed</div>
+      <div id="intercomTimingDiagnostics" class="timingProbe">Intercom timing — waiting for live audio</div>
       <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
@@ -2348,7 +2349,14 @@
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   const sessionDiag = document.getElementById("intercomSessionDiagnostics");
+  const intercomTimingDiag = document.getElementById("intercomTimingDiagnostics");
   const intercomLive = document.getElementById("intercomLive");
+  let intercomStatsTimer = null;
+  let intercomStatsSamples = 0;
+  let intercomRecentJbSumMs = 0;
+  let intercomRecentJitterSumMs = 0;
+  let lastJbDelay = null;
+  let lastJbCount = null;
 
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
@@ -2437,6 +2445,102 @@
     pollTimer = setInterval(pollSession, POLL_MS);
   }
 
+
+  function stopIntercomStats(){
+    if(intercomStatsTimer) clearInterval(intercomStatsTimer);
+    intercomStatsTimer = null;
+    lastJbDelay = null;
+    lastJbCount = null;
+  }
+
+  function fmtMs(value){
+    return Number.isFinite(value) ? `${Math.round(value)} ms` : "—";
+  }
+
+  async function sampleIntercomStats(c){
+    const pc = c && c.peerConnection;
+    if(!pc || typeof pc.getStats !== "function"){
+      if(intercomTimingDiag) intercomTimingDiag.textContent =
+        "Intercom timing — browser stats unavailable";
+      return;
+    }
+    try{
+      const report = await pc.getStats();
+      let inbound = null;
+      let pair = null;
+      report.forEach(stat => {
+        if(stat.type === "inbound-rtp" && stat.kind === "audio" && !stat.isRemote) inbound = stat;
+        if(stat.type === "candidate-pair" && stat.state === "succeeded" && stat.nominated) pair = stat;
+      });
+      if(!inbound){
+        if(intercomTimingDiag) intercomTimingDiag.textContent =
+          "Intercom timing — waiting for RTP stats";
+        return;
+      }
+
+      const jitterMs = Number.isFinite(inbound.jitter) ? inbound.jitter * 1000 : null;
+      let cumulativeJbMs = null;
+      if(Number.isFinite(inbound.jitterBufferDelay) &&
+         Number.isFinite(inbound.jitterBufferEmittedCount) &&
+         inbound.jitterBufferEmittedCount > 0){
+        cumulativeJbMs = (inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000;
+      }
+
+      let recentJbMs = null;
+      if(Number.isFinite(inbound.jitterBufferDelay) &&
+         Number.isFinite(inbound.jitterBufferEmittedCount) &&
+         lastJbDelay != null && lastJbCount != null){
+        const dDelay = inbound.jitterBufferDelay - lastJbDelay;
+        const dCount = inbound.jitterBufferEmittedCount - lastJbCount;
+        if(dCount > 0 && dDelay >= 0) recentJbMs = (dDelay / dCount) * 1000;
+      }
+      if(Number.isFinite(inbound.jitterBufferDelay)) lastJbDelay = inbound.jitterBufferDelay;
+      if(Number.isFinite(inbound.jitterBufferEmittedCount)) lastJbCount = inbound.jitterBufferEmittedCount;
+
+      intercomStatsSamples += 1;
+      if(Number.isFinite(recentJbMs)) intercomRecentJbSumMs += recentJbMs;
+      if(Number.isFinite(jitterMs)) intercomRecentJitterSumMs += jitterMs;
+
+      const avgRecentJbMs = intercomStatsSamples > 0 ? intercomRecentJbSumMs / intercomStatsSamples : null;
+      const avgJitterMs = intercomStatsSamples > 0 ? intercomRecentJitterSumMs / intercomStatsSamples : null;
+      const packetsReceived = Number.isFinite(inbound.packetsReceived) ? inbound.packetsReceived : 0;
+      const packetsLost = Number.isFinite(inbound.packetsLost) ? inbound.packetsLost : 0;
+      const packetsDiscarded = Number.isFinite(inbound.packetsDiscarded) ? inbound.packetsDiscarded : null;
+      const concealed = Number.isFinite(inbound.concealedSamples) ? inbound.concealedSamples : null;
+      const totalSamples = Number.isFinite(inbound.totalSamplesReceived) ? inbound.totalSamplesReceived : null;
+      const concealPct = concealed != null && totalSamples > 0 ? (concealed / totalSamples) * 100 : null;
+      const rttMs = pair && Number.isFinite(pair.currentRoundTripTime) ? pair.currentRoundTripTime * 1000 : null;
+
+      const line1 =
+        `Intercom timing — JB now ${fmtMs(recentJbMs)} · JB avg ${fmtMs(avgRecentJbMs)} · ` +
+        `JB total ${fmtMs(cumulativeJbMs)} · jitter ${fmtMs(jitterMs)} (avg ${fmtMs(avgJitterMs)})`;
+      const line2 = [
+        `Packets ${packetsReceived}`,
+        `loss ${packetsLost}`,
+        packetsDiscarded != null ? `discard ${packetsDiscarded}` : null,
+        concealPct != null ? `conceal ${concealPct.toFixed(2)}%` : null,
+        rttMs != null ? `RTT ${fmtMs(rttMs)}` : null,
+        `PC ${pc.connectionState || "—"}`,
+        `ICE ${pc.iceConnectionState || "—"}`
+      ].filter(Boolean).join(" · ");
+
+      if(intercomTimingDiag) intercomTimingDiag.innerHTML = `${line1}<br>${line2}`;
+    }catch(_e){
+      if(intercomTimingDiag) intercomTimingDiag.textContent =
+        "Intercom timing — stats read failed";
+    }
+  }
+
+  function startIntercomStats(c){
+    stopIntercomStats();
+    intercomStatsSamples = 0;
+    intercomRecentJbSumMs = 0;
+    intercomRecentJitterSumMs = 0;
+    if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — collecting…";
+    sampleIntercomStats(c);
+    intercomStatsTimer = setInterval(() => sampleIntercomStats(c), 2000);
+  }
+
   function attachCallHandlers(c){
     if(call && call !== c){
       try{ call.close(); }catch(_e){}
@@ -2444,6 +2548,7 @@
     call = c;
     set("Media call received…");
     c.answer();
+    startIntercomStats(c);
 
     c.on("stream", async stream => {
       audioEl.srcObject = stream;
@@ -2458,6 +2563,8 @@
 
     const finish = () => {
       if(call === c) call = null;
+      stopIntercomStats();
+      if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — broadcast ended";
       if(intercomLive) intercomLive.classList.remove("active");
       try{
         audioEl.pause();
