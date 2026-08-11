@@ -2384,111 +2384,114 @@
       return;
     }
     if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
-    peer = new Peer();
+    let peerGeneration = 0;
     let retryTimer = null;
-    let connectGeneration = 0;
 
-    const scheduleFreshConnect = (delay = 2000) => {
+    const schedulePeerRestart = (delay = 2000) => {
       if(retryTimer) clearTimeout(retryTimer);
-      retryTimer = setTimeout(()=>{
+      retryTimer = setTimeout(() => {
         retryTimer = null;
-        connectToManager();
+        startFreshPeer();
       }, delay);
     };
 
-    const connectToManager = () => {
-      if(!peer || peer.destroyed || !peer.open) return;
-      if(conn && conn.open) return;
-
-      // Important: every attempt is a brand-new DataConnection. Never reuse an
-      // unavailable/stale connection object after the Manager did not exist yet.
+    const startFreshPeer = () => {
       if(conn){
         try{ conn.close(); }catch(_e){}
         conn = null;
       }
-
-      const generation = ++connectGeneration;
-      set("Listener open — looking for broadcast…");
-
-      let attempt;
-      try{
-        attempt = peer.connect(CHANNEL, {reliable:true});
-      }catch(_e){
-        scheduleFreshConnect();
-        return;
+      if(peer){
+        try{ peer.destroy(); }catch(_e){}
+        peer = null;
       }
-      conn = attempt;
 
-      attempt.on("open", () => {
-        if(generation !== connectGeneration) return;
-        if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
-        set("Connected — waiting for live voice…");
-        try{ attempt.send({type:"listener-ready"}); }catch(_e){}
+      const generation = ++peerGeneration;
+      set("Listener restarting — looking for manager…");
+
+      peer = new Peer();
+
+      peer.on("open", () => {
+        if(generation !== peerGeneration) return;
+        set("Listener open — looking for manager…");
+
+        let attempt;
+        try{
+          attempt = peer.connect(CHANNEL, {reliable:true});
+        }catch(_e){
+          schedulePeerRestart();
+          return;
+        }
+        conn = attempt;
+
+        attempt.on("open", () => {
+          if(generation !== peerGeneration) return;
+          if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+          set("Connected — waiting for live voice…");
+          try{ attempt.send({type:"listener-ready"}); }catch(_e){}
+        });
+
+        attempt.on("error", () => {
+          if(generation !== peerGeneration) return;
+          set("Manager not available yet — retrying…");
+          schedulePeerRestart();
+        });
+
+        attempt.on("close", () => {
+          if(generation !== peerGeneration) return;
+          if(call) return;
+          set("Manager connection closed — retrying…");
+          schedulePeerRestart();
+        });
       });
 
-      attempt.on("error", () => {
-        if(generation !== connectGeneration || attempt.open) return;
-        try{ attempt.close(); }catch(_e){}
-        if(conn === attempt) conn = null;
-        set("Waiting for manager…");
-        scheduleFreshConnect();
+      peer.on("call", c => {
+        if(generation !== peerGeneration) return;
+
+        if(call && call !== c){
+          try{ call.close(); }catch(_e){}
+        }
+        call = c;
+        set("Media call received…");
+        c.answer();
+
+        c.on("stream", async stream => {
+          audioEl.srcObject = stream;
+          try{
+            await audioEl.play();
+            set("LIVE — receiving audio");
+          }catch(_e){
+            set("Audio waiting for user gesture");
+          }
+        });
+
+        const finishCall = () => {
+          if(call === c) call = null;
+          try{
+            audioEl.pause();
+            audioEl.srcObject = null;
+          }catch(_e){}
+          set(conn && conn.open
+            ? "Connected — waiting for live voice…"
+            : "Waiting for manager…");
+        };
+
+        c.on("close", finishCall);
+        c.on("error", finishCall);
       });
 
-      attempt.on("close", () => {
-        if(generation !== connectGeneration) return;
-        if(conn === attempt) conn = null;
-        if(!call){
-          set("Waiting for manager…");
-          scheduleFreshConnect();
+      peer.on("error", e => {
+        if(generation !== peerGeneration) return;
+        if(e && e.type === "peer-unavailable"){
+          set("Manager not available yet — retrying…");
+          schedulePeerRestart();
+        }else{
+          set("Peer error: " + (e.type || e.message || "unknown") + " — retrying…");
+          schedulePeerRestart(3000);
         }
       });
     };
 
-    peer.on("open", connectToManager);
-    peer.on("call", c => {
-      // Every broadcast is a fresh media call. Retire any stale prior call
-      // reference so this receiver can accept repeated god-mic sessions.
-      if(call && call !== c){
-        try{ call.close(); }catch(_e){}
-      }
-      call = c;
-      set("Media call received…");
-      c.answer();
-
-      c.on("stream", async stream => {
-        audioEl.srcObject = stream;
-        try{
-          await audioEl.play();
-          set("LIVE — receiving audio");
-        }catch(e){
-          set("Audio waiting for user gesture");
-        }
-      });
-
-      const finishCall = () => {
-        if(call === c) call = null;
-        try{
-          audioEl.pause();
-          audioEl.srcObject = null;
-        }catch(_e){}
-        set(conn && conn.open
-          ? "Connected — waiting for live voice…"
-          : "Waiting for manager…");
-      };
-
-      c.on("close", finishCall);
-      c.on("error", finishCall);
-    });
-    peer.on("error", e => {
-      if(e && e.type === "peer-unavailable"){
-        if(conn){ try{ conn.close(); }catch(_e){} conn = null; }
-        set("Waiting for manager…");
-        scheduleFreshConnect();
-      }else{
-        set("Peer error: " + (e.type || e.message || "unknown"));
-        btn.disabled=false;
-      }
-    });
+    startFreshPeer();
   });
 })();
 </script>
