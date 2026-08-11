@@ -2351,16 +2351,32 @@
     set("Opening listener…");
     if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
     peer = new Peer();
-    peer.on("open", () => {
+    let retryTimer = null;
+    const connectToManager = () => {
+      if(!peer || peer.destroyed || !peer.open) return;
+      if(conn && conn.open) return;
       set("Listener open — connecting…");
-      conn = peer.connect(CHANNEL, {reliable:true});
-      conn.on("open", () => {
-        set("Connected — waiting for live voice…");
-        try{ conn.send({type:"listener-ready"}); }catch(_e){}
-      });
-      conn.on("error", e => set("Connection error: " + (e.type || e.message || "unknown")));
-      conn.on("close", () => set("Connection closed"));
-    });
+      try{
+        conn = peer.connect(CHANNEL, {reliable:true});
+        conn.on("open", () => {
+          if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+          set("Connected — waiting for live voice…");
+          try{ conn.send({type:"listener-ready"}); }catch(_e){}
+        });
+        const retry = () => {
+          if(conn && conn.open) return;
+          set("Waiting for broadcast…");
+          if(retryTimer) clearTimeout(retryTimer);
+          retryTimer = setTimeout(connectToManager, 2000);
+        };
+        conn.on("error", retry);
+        conn.on("close", retry);
+      }catch(_e){
+        if(retryTimer) clearTimeout(retryTimer);
+        retryTimer = setTimeout(connectToManager, 2000);
+      }
+    };
+    peer.on("open", connectToManager);
     peer.on("call", c => {
       call = c;
       set("Media call received…");
@@ -2372,7 +2388,16 @@
       });
       c.on("close", () => set("Broadcast ended"));
     });
-    peer.on("error", e => { set("Peer error: " + (e.type || e.message || "unknown")); btn.disabled=false; });
+    peer.on("error", e => {
+      if(e && e.type === "peer-unavailable"){
+        set("Waiting for broadcast…");
+        if(retryTimer) clearTimeout(retryTimer);
+        retryTimer = setTimeout(connectToManager, 2000);
+      }else{
+        set("Peer error: " + (e.type || e.message || "unknown"));
+        btn.disabled=false;
+      }
+    });
   });
 })();
 </script>
