@@ -2328,38 +2328,28 @@
 
 <div id="isoIntercomBlue" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
   <button id="isoListenBtn" type="button" style="display:none">Listen</button>
-  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div>
+  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom ready</div>
 </div>
 <script>
 (() => {
-  let CHANNEL = null;
+  const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
+  const SESSION_KEY = 'common-v6-intercom-session';
+  const HEARTBEAT_MS = 8000;
+  const POLL_MS = 2500;
 
-  function intercomChannelForStartValue(value){
-    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
-    return clean ? `common-v6-${clean}` : null;
-  }
-
-  window.armCommonIntercomSession = (value) => {
-    const requested = intercomChannelForStartValue(value);
-    let frozen = null;
-    try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
-
-    // If this tab has already armed a show session, preserve it across refresh/rejoin.
-    CHANNEL = frozen || requested;
-
-    if(CHANNEL && !frozen){
-      try{ sessionStorage.setItem(SESSION_KEY, CHANNEL); }catch(_e){}
-    }
-
-    if(sessionDiag) sessionDiag.textContent = "Session: " + (CHANNEL || "—");
-    return CHANNEL;
-  };
+  let sessionId = null;
+  let peer = null;
+  let peerId = null;
+  let call = null;
+  let heartbeatTimer = null;
+  let pollTimer = null;
+  let started = false;
 
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   const sessionDiag = document.getElementById("intercomSessionDiagnostics");
-  const SESSION_KEY = "common-v6-intercom-session";
-  let peer = null, conn = null, call = null;
+  const intercomLive = document.getElementById("intercomLive");
+
   let audioEl = document.getElementById("isoRemoteAudio");
   if(!audioEl){
     audioEl = document.createElement("audio");
@@ -2369,172 +2359,184 @@
     audioEl.style.display = "none";
     document.body.appendChild(audioEl);
   }
-  const set = t => status.textContent = t;
+
+  function intercomChannelForStartValue(value){
+    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
+    return clean ? `common-v6-${clean}` : null;
+  }
+
+  function freezeSession(value){
+    const requested = intercomChannelForStartValue(value);
+    let frozen = null;
+    try{ frozen = sessionStorage.getItem(SESSION_KEY); }catch(_e){}
+    sessionId = frozen || requested;
+    if(sessionId && !frozen){
+      try{ sessionStorage.setItem(SESSION_KEY, sessionId); }catch(_e){}
+    }
+    if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
+    return sessionId;
+  }
+
   try{
     const stored = sessionStorage.getItem(SESSION_KEY);
-    if(stored && sessionDiag) sessionDiag.textContent = "Session: " + stored;
-  }catch(_e){}
-  btn.addEventListener("click", () => {
-    if(peer) return;
-    btn.disabled = true;
-    set("Opening listener…");
-    if(!CHANNEL){
-      set("Intercom session not armed");
-      btn.disabled=false;
-      return;
+    if(stored){
+      sessionId = stored;
+      if(sessionDiag) sessionDiag.textContent = "Session: " + stored;
     }
-    if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
-    let peerGeneration = 0;
-    let retryTimer = null;
+  }catch(_e){}
 
-    const schedulePeerRestart = (delay = 2000) => {
-      if(retryTimer) clearTimeout(retryTimer);
-      retryTimer = setTimeout(() => {
-        retryTimer = null;
-        startFreshPeer();
-      }, delay);
-    };
+  const set = t => { if(status) status.textContent = t; };
 
-    const startFreshPeer = () => {
-      if(conn){
-        try{ conn.close(); }catch(_e){}
-        conn = null;
+  async function registry(path="", options={}){
+    if(!sessionId) throw new Error("No intercom session");
+    const url = `${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}${path}`;
+    const response = await fetch(url, {
+      cache:"no-store",
+      ...options,
+      headers:{"Content-Type":"application/json", ...(options.headers||{})}
+    });
+    if(!response.ok) throw new Error(`Registry ${response.status}`);
+    return await response.json();
+  }
+
+  async function heartbeat(){
+    if(!peerId || !sessionId) return;
+    try{
+      await registry("/receiver", {
+        method:"POST",
+        body:JSON.stringify({peerId})
+      });
+    }catch(_e){
+      set("Receiver registered locally · registry retrying…");
+    }
+  }
+
+  async function pollSession(){
+    if(!sessionId || !peerId) return;
+    try{
+      const state = await registry("");
+      const managerText = state.managerPresent ? "manager online" : "waiting for manager";
+      if(!call) set(`Receiver registered · ${managerText}`);
+    }catch(_e){
+      if(!call) set("Receiver registered · registry reconnecting…");
+    }
+  }
+
+  function clearTimers(){
+    if(heartbeatTimer) clearInterval(heartbeatTimer);
+    if(pollTimer) clearInterval(pollTimer);
+    heartbeatTimer = null;
+    pollTimer = null;
+  }
+
+  async function registerReceiver(){
+    await heartbeat();
+    await pollSession();
+    clearTimers();
+    heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+    pollTimer = setInterval(pollSession, POLL_MS);
+  }
+
+  function attachCallHandlers(c){
+    if(call && call !== c){
+      try{ call.close(); }catch(_e){}
+    }
+    call = c;
+    set("Media call received…");
+    c.answer();
+
+    c.on("stream", async stream => {
+      audioEl.srcObject = stream;
+      try{
+        await audioEl.play();
+        if(intercomLive) intercomLive.classList.add("active");
+        set("LIVE — receiving audio");
+      }catch(_e){
+        set("LIVE — audio waiting for user gesture");
       }
-      if(peer){
-        try{ peer.destroy(); }catch(_e){}
-        peer = null;
-      }
+    });
 
-      const generation = ++peerGeneration;
-      set("Listener restarting — looking for manager…");
-
-      peer = new Peer();
-
-      peer.on("open", () => {
-        if(generation !== peerGeneration) return;
-        set("Listener open — looking for manager…");
-
-        let attempt;
-        try{
-          attempt = peer.connect(CHANNEL, {reliable:true});
-        }catch(_e){
-          schedulePeerRestart();
-          return;
-        }
-        conn = attempt;
-
-        attempt.on("open", () => {
-          if(generation !== peerGeneration) return;
-          if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
-          set("Connected — waiting for live voice…");
-          try{ attempt.send({type:"listener-ready"}); }catch(_e){}
-        });
-
-        attempt.on("error", () => {
-          if(generation !== peerGeneration) return;
-          set("Manager not available yet — retrying…");
-          schedulePeerRestart();
-        });
-
-        attempt.on("close", () => {
-          if(generation !== peerGeneration) return;
-          if(call) return;
-          set("Manager connection closed — retrying…");
-          schedulePeerRestart();
-        });
-      });
-
-      peer.on("call", c => {
-        if(generation !== peerGeneration) return;
-
-        if(call && call !== c){
-          try{ call.close(); }catch(_e){}
-        }
-        call = c;
-        set("Media call received…");
-        c.answer();
-
-        c.on("stream", async stream => {
-          audioEl.srcObject = stream;
-          try{
-            await audioEl.play();
-            set("LIVE — receiving audio");
-          }catch(_e){
-            set("Audio waiting for user gesture");
-          }
-        });
-
-        const finishCall = () => {
-          if(call === c) call = null;
-          try{
-            audioEl.pause();
-            audioEl.srcObject = null;
-          }catch(_e){}
-          set(conn && conn.open
-            ? "Connected — waiting for live voice…"
-            : "Waiting for manager…");
-        };
-
-        c.on("close", finishCall);
-        c.on("error", finishCall);
-      });
-
-      peer.on("error", e => {
-        if(generation !== peerGeneration) return;
-        if(e && e.type === "peer-unavailable"){
-          set("Manager not available yet — retrying…");
-          schedulePeerRestart();
-        }else{
-          set("Peer error: " + (e.type || e.message || "unknown") + " — retrying…");
-          schedulePeerRestart(3000);
-        }
-      });
+    const finish = () => {
+      if(call === c) call = null;
+      if(intercomLive) intercomLive.classList.remove("active");
+      try{
+        audioEl.pause();
+        audioEl.srcObject = null;
+      }catch(_e){}
+      pollSession();
     };
+    c.on("close", finish);
+    c.on("error", finish);
+  }
 
-    startFreshPeer();
+  function startPeer(){
+    if(peer) return;
+    if(!window.Peer){ set("PeerJS unavailable"); return; }
+    set("Opening receiver…");
+    peer = new Peer();
+
+    peer.on("open", async id => {
+      peerId = id;
+      set("Receiver open · registering session…");
+      await registerReceiver();
+    });
+
+    peer.on("call", attachCallHandlers);
+
+    peer.on("disconnected", () => {
+      set("Receiver signaling reconnecting…");
+      try{ peer.reconnect(); }catch(_e){}
+    });
+
+    peer.on("error", e => {
+      const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
+      if(kind === "network"){
+        set("Receiver network warning · retrying…");
+      }else{
+        set("Receiver peer warning: " + kind);
+      }
+    });
+  }
+
+  btn.addEventListener("click", () => {
+    if(started) return;
+    started = true;
+    startPeer();
   });
-})();
-</script>
 
-
-
-
-
-<script>
-(() => {
   const begin = document.getElementById("playButton");
-  const listen = document.getElementById("isoListenBtn");
-  const remote = document.getElementById("isoRemoteAudio");
   const startField = document.getElementById("startTime");
   const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
-  if(begin && listen){
+
+  if(begin && btn){
     begin.addEventListener("click", () => {
-      // v6 session scope: intercom session identity comes only from the selected
-      // Start Time. Matching Start Time = matching show intercom session.
-      const armedChannel =
-        typeof window.armCommonIntercomSession === "function"
-          ? window.armCommonIntercomSession(startField && startField.value)
-          : null;
-      if(!armedChannel){
-        const status = document.getElementById("isoBlueStatus");
-        if(status) status.textContent = "Intercom session needs a Start Time";
+      const armed = freezeSession(startField && startField.value);
+      if(!armed){
+        set("Intercom session needs a Start Time");
         return;
       }
 
-      // Preserve user activation for future remote audio playback.
-      if(remote){
-        try{
-          remote.srcObject = null;
-          remote.src = SILENT_WAV;
-          remote.loop = true;
-          remote.volume = 0.0001;
-          const p = remote.play();
-          if(p && typeof p.catch === "function") p.catch(()=>{});
-        }catch(_e){}
-      }
-      if(!listen.disabled) listen.click();
+      try{
+        audioEl.srcObject = null;
+        audioEl.src = SILENT_WAV;
+        audioEl.loop = true;
+        audioEl.volume = 0.0001;
+        const p = audioEl.play();
+        if(p && typeof p.catch === "function") p.catch(()=>{});
+      }catch(_e){}
+
+      btn.click();
     }, {once:true, capture:true});
   }
+
+  window.addEventListener("pagehide", () => {
+    if(peerId && sessionId){
+      fetch(`${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}/receiver/${encodeURIComponent(peerId)}`, {
+        method:"DELETE",
+        keepalive:true
+      }).catch(()=>{});
+    }
+  });
 })();
 </script>
 
