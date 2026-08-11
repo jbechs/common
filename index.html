@@ -185,6 +185,7 @@
 
   <main class="container">
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
+    <button id="manualListenTest" type="button" style="margin-bottom:8px">Listen</button>
     <div class="header">
       <h1>common</h1>
       <div class="subtitle">v5</div>
@@ -1548,7 +1549,58 @@
         }, 3000);
 
         setStatus(reason);
-        updateTransport();
+    
+    // TEMPORARY MANUAL GOLDEN LISTENER TEST
+    const manualListenTest = document.getElementById("manualListenTest");
+    let manualGoldenPeer = null;
+    let manualGoldenConn = null;
+    manualListenTest.addEventListener("click", ()=>{
+      if(manualGoldenPeer) return;
+      manualListenTest.disabled = true;
+      intercomLog("opening listener");
+      manualGoldenPeer = new Peer();
+      manualGoldenPeer.on("open", ()=>{
+        intercomLog("listener open · connecting");
+        manualGoldenConn = manualGoldenPeer.connect(INTERCOM_HOST_ID, {reliable:true});
+        manualGoldenConn.on("open", ()=>{
+          intercomLog("connected · waiting for live voice");
+          try{ manualGoldenConn.send({type:"listener-ready"}); }catch(_err){}
+        });
+        manualGoldenConn.on("data", data=>{
+          if(data && data.type === "mic-state") setIntercomDuck(data.live === true);
+        });
+        manualGoldenConn.on("error", err=> intercomLog("connection error: " + (err.type || err.message || "unknown")));
+        manualGoldenConn.on("close", ()=> intercomLog("connection closed"));
+      });
+      manualGoldenPeer.on("call", call=>{
+        intercomLog("media call received");
+        call.answer();
+        call.on("stream", async stream=>{
+          intercomAudio.srcObject = stream;
+          intercomAudio.removeAttribute("src");
+          intercomAudio.loop = false;
+          intercomAudio.volume = 1;
+          try{
+            await intercomAudio.play();
+            intercomLog("LIVE audio received");
+            intercomLive.classList.add("active");
+          }catch(err){
+            intercomLog("audio blocked: " + (err.name || err.message || "error"));
+          }
+        });
+        call.on("close", ()=>{
+          intercomLive.classList.remove("active");
+          setIntercomDuck(false);
+          intercomLog("broadcast ended");
+        });
+      });
+      manualGoldenPeer.on("error", err=>{
+        intercomLog("peer error: " + (err.type || err.message || "unknown"));
+        manualListenTest.disabled = false;
+      });
+    });
+
+    updateTransport();
         updateDriftStats();
         return true;
       }else{
@@ -2325,7 +2377,7 @@
     const intercomAudio = document.getElementById("intercomAudio");
     const intercomLive = document.getElementById("intercomLive");
     const intercomDiagnostics = document.getElementById("intercomDiagnostics");
-    const INTERCOM_HOST_ID = "common-v5-4348238a9a34";
+    const INTERCOM_HOST_ID = "common-manual-c2954238e75e";
     const INTERCOM_PEERJS_SRC = "https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js";
     const INTERCOM_DUCK_DB = 15;
     const INTERCOM_DUCK_FACTOR = Math.pow(10, -INTERCOM_DUCK_DB / 20);
@@ -2437,8 +2489,6 @@
 
     // Use Common's existing Begin gesture to unlock remote audio and arm the
     // proven receiver handshake before preshow. The sync preparation call is unchanged.
-    playButton.addEventListener("pointerdown", unlockIntercomAudio, {once:true});
-    playButton.addEventListener("click", ()=>{ startIntercomReceiver(); }, {once:true});
 
     updateTransport();
     updateDriftStats();
