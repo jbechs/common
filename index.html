@@ -2331,7 +2331,7 @@
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-sequence-02fad24c4a3b';
+  const CHANNEL = 'common-presence-650640011170';
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   let peer = null, conn = null, call = null;
@@ -2396,7 +2396,7 @@
         if(generation !== connectGeneration || attempt.open) return;
         try{ attempt.close(); }catch(_e){}
         if(conn === attempt) conn = null;
-        set("Waiting for broadcast…");
+        set("Waiting for manager…");
         scheduleFreshConnect();
       });
 
@@ -2404,7 +2404,7 @@
         if(generation !== connectGeneration) return;
         if(conn === attempt) conn = null;
         if(!call){
-          set("Waiting for broadcast…");
+          set("Waiting for manager…");
           scheduleFreshConnect();
         }
       });
@@ -2425,7 +2425,7 @@
     peer.on("error", e => {
       if(e && e.type === "peer-unavailable"){
         if(conn){ try{ conn.close(); }catch(_e){} conn = null; }
-        set("Waiting for broadcast…");
+        set("Waiting for manager…");
         scheduleFreshConnect();
       }else{
         set("Peer error: " + (e.type || e.message || "unknown"));
