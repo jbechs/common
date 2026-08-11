@@ -204,7 +204,7 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="intercomDiagnostics" class="timingProbe">Intercom — dormant</div>
+      <div id="intercomDiagnostics" class="timingProbe">Intercom — receiver idle</div>
     </div>
 
 
@@ -2327,11 +2327,11 @@
 
 <div id="isoIntercomBlue" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
   <button id="isoListenBtn" type="button" style="display:none">Listen</button>
-  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div><div style="font-size:.68rem;opacity:.45;margin-top:4px">BUILD proof-bb466b8b · common-proof-121a9edb438d</div>
+  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom test ready</div>
 </div>
 <script>
 (() => {
-  const CHANNEL = 'common-proof-121a9edb438d';
+  const CHANNEL = 'common-sequence-02fad24c4a3b';
   const btn = document.getElementById("isoListenBtn");
   const status = document.getElementById("isoBlueStatus");
   let peer = null, conn = null, call = null;
@@ -2352,30 +2352,64 @@
     if(!window.Peer){ set("PeerJS unavailable"); btn.disabled=false; return; }
     peer = new Peer();
     let retryTimer = null;
+    let connectGeneration = 0;
+
+    const scheduleFreshConnect = (delay = 2000) => {
+      if(retryTimer) clearTimeout(retryTimer);
+      retryTimer = setTimeout(()=>{
+        retryTimer = null;
+        connectToManager();
+      }, delay);
+    };
+
     const connectToManager = () => {
       if(!peer || peer.destroyed || !peer.open) return;
       if(conn && conn.open) return;
-      set("Listener open — connecting to common-proof-121a9edb438d…");
-      try{
-        conn = peer.connect(CHANNEL, {reliable:true});
-        conn.on("open", () => {
-          if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
-          set("Connected — waiting for live voice…");
-          try{ conn.send({type:"listener-ready"}); }catch(_e){}
-        });
-        const retry = () => {
-          if(conn && conn.open) return;
-          set("Waiting for broadcast…");
-          if(retryTimer) clearTimeout(retryTimer);
-          retryTimer = setTimeout(connectToManager, 2000);
-        };
-        conn.on("error", retry);
-        conn.on("close", retry);
-      }catch(_e){
-        if(retryTimer) clearTimeout(retryTimer);
-        retryTimer = setTimeout(connectToManager, 2000);
+
+      // Important: every attempt is a brand-new DataConnection. Never reuse an
+      // unavailable/stale connection object after the Manager did not exist yet.
+      if(conn){
+        try{ conn.close(); }catch(_e){}
+        conn = null;
       }
+
+      const generation = ++connectGeneration;
+      set("Listener open — looking for broadcast…");
+
+      let attempt;
+      try{
+        attempt = peer.connect(CHANNEL, {reliable:true});
+      }catch(_e){
+        scheduleFreshConnect();
+        return;
+      }
+      conn = attempt;
+
+      attempt.on("open", () => {
+        if(generation !== connectGeneration) return;
+        if(retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+        set("Connected — waiting for live voice…");
+        try{ attempt.send({type:"listener-ready"}); }catch(_e){}
+      });
+
+      attempt.on("error", () => {
+        if(generation !== connectGeneration || attempt.open) return;
+        try{ attempt.close(); }catch(_e){}
+        if(conn === attempt) conn = null;
+        set("Waiting for broadcast…");
+        scheduleFreshConnect();
+      });
+
+      attempt.on("close", () => {
+        if(generation !== connectGeneration) return;
+        if(conn === attempt) conn = null;
+        if(!call){
+          set("Waiting for broadcast…");
+          scheduleFreshConnect();
+        }
+      });
     };
+
     peer.on("open", connectToManager);
     peer.on("call", c => {
       call = c;
@@ -2390,9 +2424,9 @@
     });
     peer.on("error", e => {
       if(e && e.type === "peer-unavailable"){
+        if(conn){ try{ conn.close(); }catch(_e){} conn = null; }
         set("Waiting for broadcast…");
-        if(retryTimer) clearTimeout(retryTimer);
-        retryTimer = setTimeout(connectToManager, 2000);
+        scheduleFreshConnect();
       }else{
         set("Peer error: " + (e.type || e.message || "unknown"));
         btn.disabled=false;
