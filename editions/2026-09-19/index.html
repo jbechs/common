@@ -573,8 +573,8 @@
 
 
     /* --- EDITION: SEPTEMBER 19, 2026 ---------------------------------------
-       Show-specific front door only. The canonical Common playback, sync,
-       calibration, intercom, and post-show systems remain unchanged.
+       Show-specific front door plus a long-future curtain-timer safeguard.
+       Common playback, sync, calibration, intercom, and post-show behavior remain unchanged.
     ---------------------------------------------------------------------- */
     .editionEntry{display:grid;gap:14px;width:100%;}
     .editionPrompt{margin:0 0 4px;color:#bbb;font-size:.82rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;}
@@ -617,8 +617,6 @@
 
     <!-- The canonical engine still reads this exact field. The edition UI writes it. -->
     <input id="startTime" type="hidden" />
-    <div id="editionBeginSlot" class="hidden"></div>
-
     <button id="startNowButton" class="startNow hidden">Begin</button>
 
     <div id="countdown" class="countdown"></div>
@@ -763,7 +761,6 @@
     const editionDialogBackdrop = document.getElementById("editionDialogBackdrop");
     const editionDialogTime = document.getElementById("editionDialogTime");
     const editionCancelButton = document.getElementById("editionCancelButton");
-    const editionBeginSlot = document.getElementById("editionBeginSlot");
 
     function closeEditionDialog(){
       editionDialogBackdrop.classList.remove("open");
@@ -790,20 +787,12 @@
       if(event.key === "Escape" && editionDialogBackdrop.classList.contains("open")) closeEditionDialog();
     });
 
-    // The canonical Begin handler still receives this same direct audience click.
+    // The canonical Begin button stays permanently in its original edition-dialog
+    // DOM position. The audience's direct tap is therefore the exact trusted gesture
+    // Common's preparation path receives; nothing is reparented during that event.
     playButton.addEventListener("click", ()=>{
       closeEditionDialog();
       if(editionEntry) editionEntry.classList.add("hidden");
-
-      // After this trusted Begin gesture has reached Common's canonical handler,
-      // return the same button to the normal page. This preserves the root UI's
-      // retry path if preparation fails without introducing a second Begin control.
-      setTimeout(()=>{
-        if(editionBeginSlot){
-          editionBeginSlot.classList.remove("hidden");
-          editionBeginSlot.appendChild(playButton);
-        }
-      }, 0);
     }, {capture:true});
 
     // Refresh default: choose the earliest whole-minute start strictly more
@@ -983,6 +972,12 @@
     const MAIN_VOLUME = 1.0;
     const CROSSFADE_MS = 1000;
     const FADE_STEP_MS = 50;
+
+    // Edition safeguard: browsers cannot reliably represent one setTimeout longer
+    // than ~24.8 days. A September performance selected more than that far ahead
+    // would otherwise fire the curtain timeout immediately. Keep the canonical
+    // show clock as truth and wake in bounded chunks until curtain is actually near.
+    const MAX_CURTAIN_TIMEOUT_CHUNK_MS = 12 * 60 * 60 * 1000;
 
     function highResNowMs(){
       return performance.timeOrigin + performance.now();
@@ -2576,11 +2571,23 @@
 
       updateCountdown();
 
-      countdownTimer = setTimeout(()=>{
-        clearTimers();
-        setCountdown("Starting now");
-        tryAutomaticStart();
-      }, Math.max(0, startTimeMs - syncedNowMs()));
+      function scheduleCurtainWake(){
+        const remaining = startTimeMs - syncedNowMs();
+
+        if(remaining <= 0){
+          clearTimers();
+          setCountdown("Starting now");
+          tryAutomaticStart();
+          return;
+        }
+
+        countdownTimer = setTimeout(()=>{
+          countdownTimer = null;
+          scheduleCurtainWake();
+        }, Math.min(remaining, MAX_CURTAIN_TIMEOUT_CHUNK_MS));
+      }
+
+      scheduleCurtainWake();
     }
 
     async function handlePrepare(isAutomaticRetry = false){
