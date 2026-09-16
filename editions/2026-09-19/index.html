@@ -132,13 +132,6 @@
     .diagnosticsPanel.hidden{
       display:none;
     }
-
-
-    /* --- INTERCOM EXPERIMENT -------------------------------------------
-       Completely dormant unless the hidden label is triple-tapped.
-       This layer never reads or writes Common's show clock, sync state,
-       playbackRate, currentTime, drift correction, or main audio element.
-    ------------------------------------------------------------------- */
     .hidden{
       display:none;
     }
@@ -156,7 +149,7 @@
       filter:invert(1);
     }
 
-    /* Common participant skin: deep blue vignette. Visual only; sync/intercom untouched. */
+    /* Common participant skin: deep blue vignette. Visual only; sync untouched. */
     body{
       background:#061427 !important;
       background-image:radial-gradient(circle at 50% 40%, #123f6b 0%, #092744 50%, #020b16 100%) !important;
@@ -164,19 +157,6 @@
     }
     input, input[type="datetime-local"]{ background:#0b2742 !important; }
     .diagnosticsToggle{ background:rgba(2,9,21,.34) !important; color:rgba(18,63,107,.42) !important; border-color:rgba(7,24,42,.28) !important; opacity:.28; box-shadow:none !important; }
-
-
-    .intercomLive{
-      min-height:1em;
-      margin-bottom:-8px;
-      font-size:.72rem;
-      font-weight:600;
-      letter-spacing:.12em;
-      color:#ff6b6b;
-      opacity:0;
-      transition:opacity .15s ease;
-    }
-    .intercomLive.active{ opacity:1; }
 
   
     /* Portrait-only presentation: hide the app in landscape without touching playback. */
@@ -194,7 +174,7 @@
 
     /* --- POST-SHOW EPILOGUE -----------------------------------------------
        Presentation-only layer. It does not read or write Common's show clock,
-       drift controller, playbackRate, media position, or intercom transport.
+       drift controller, playbackRate, or media position.
        Triggered only by the main program audio's native "ended" event.
     ---------------------------------------------------------------------- */
     #postShowBlackout{
@@ -572,9 +552,43 @@
 
 
 
+
+    /* --- HIDDEN TEST MODE --------------------------------------------------
+       Presentation-only access to the canonical startTime field.
+       Triple-tap the "common" heading to reveal. Playback/sync are unchanged.
+    ---------------------------------------------------------------------- */
+    .testModePanel{
+      display:none;
+      width:100%;
+      box-sizing:border-box;
+      padding:16px;
+      border:1px solid rgba(255,255,255,.18);
+      border-radius:8px;
+      background:rgba(2,9,21,.45);
+      gap:10px;
+    }
+    .testModePanel.open{display:grid;}
+    .testModeLabel{
+      margin:0;
+      color:#aaa;
+      font-size:.78rem;
+      font-weight:600;
+      letter-spacing:.12em;
+      text-transform:uppercase;
+    }
+    #testStartTime{
+      width:100%;
+      box-sizing:border-box;
+    }
+    #testBeginButton{
+      width:100%;
+      min-width:0;
+      justify-self:stretch;
+    }
+
     /* --- EDITION: SEPTEMBER 19, 2026 ---------------------------------------
        Show-specific front door plus a long-future curtain-timer safeguard.
-       Common playback, sync, calibration, intercom, and post-show behavior remain unchanged.
+       Common playback, sync, calibration, and post-show behavior remain unchanged.
     ---------------------------------------------------------------------- */
     .editionEntry{display:grid;gap:14px;width:100%;}
     .editionPrompt{margin:0 0 4px;color:#bbb;font-size:.82rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;}
@@ -600,9 +614,8 @@
 
 
   <main class="container">
-    <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
 <div class="header">
-      <h1>common</h1>
+      <h1 id="testModeTrigger">common</h1>
       <div class="subtitle">September 19, 2026</div>
     </div>
 
@@ -617,6 +630,12 @@
 
     <!-- The canonical engine still reads this exact field. The edition UI writes it. -->
     <input id="startTime" type="hidden" />
+
+    <div id="testModePanel" class="testModePanel" aria-hidden="true">
+      <p class="testModeLabel">Test mode · manual start time</p>
+      <input id="testStartTime" type="datetime-local" step="60" aria-label="Test start time" />
+      <button id="testBeginButton" type="button">Begin test</button>
+    </div>
     <button id="startNowButton" class="startNow hidden">Begin</button>
 
     <div id="countdown" class="countdown"></div>
@@ -627,14 +646,10 @@
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
-      <div id="intercomDiagnostics" class="timingProbe">Intercom — session not armed</div>
-      <div id="intercomTimingDiagnostics" class="timingProbe">Intercom timing — waiting for live audio</div>
-      <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
     </div>
 
 
     <audio id="audio" preload="auto" playsinline class="hidden"></audio>
-    <audio id="intercomAudio" autoplay playsinline class="hidden"></audio>
     <audio id="preshowAudio" preload="auto" playsinline loop class="hidden"></audio>
   </main>
 
@@ -753,7 +768,6 @@
   </section>
 
 
-  <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script> 
     const AUDIO_URL = "https://eggtooth.xyz/common2audience.mp3";
     const PRESHOW_AUDIO_URL = "https://eggtooth.xyz/preshow.mp3";
@@ -2816,7 +2830,7 @@
 
     function capturePerformanceSession(){
       // The visible Start Time is already Common's performance-session authority.
-      // Capture it before the show ends so intercom cleanup cannot erase our grouping key.
+      // Capture it before the show ends so the post-show grouping key remains stable.
       const startValue = startInput && startInput.value ? startInput.value : "";
       commonPerformanceSessionId = performanceSessionForStartValue(startValue);
 
@@ -3165,8 +3179,8 @@
       }, 6000);
     }
 
-    // Capture the same performance identifier used by Common's intercom session
-    // at the audience's Begin gesture. This is read-only bookkeeping.
+    // Capture the performance identifier at the audience's Begin gesture.
+    // This is read-only bookkeeping for post-show grouping.
     playButton.addEventListener("click", capturePerformanceSession, {capture:true});
     startNowButton.addEventListener("click", capturePerformanceSession, {capture:true});
 
@@ -3368,636 +3382,45 @@
     updateTimingProbe();
   </script>
 
-<div id="isoIntercomBlue" style="position:relative;margin:10px auto 0;max-width:520px;text-align:center">
-  <button id="isoListenBtn" type="button" style="display:none">Listen</button>
-  <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom ready</div>
-</div>
-<script>
-(() => {
-  const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
-  const SESSION_KEY = 'common-v6-intercom-session';
 
-  const SESSION_START_KEY = "common-v6-intercom-start-value";
-  const SESSION_EARLY_MS = 10 * 60 * 1000;
-  const SESSION_LATE_MS = 30 * 60 * 1000;
 
-  function parseSessionStartFromId(id){
-    const m = String(id || "").match(/^common-v6-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})$/);
-    if(!m) return null;
-    const [, y, mo, d, h, mi] = m;
-    return `${y}-${mo}-${d}T${h}:${mi}`;
-  }
+  <script>
+  (() => {
+    const trigger = document.getElementById("testModeTrigger");
+    const panel = document.getElementById("testModePanel");
+    const testInput = document.getElementById("testStartTime");
+    const canonicalInput = document.getElementById("startTime");
+    const testBegin = document.getElementById("testBeginButton");
+    const canonicalBegin = document.getElementById("playButton");
+    if(!trigger || !panel || !testInput || !canonicalInput || !testBegin || !canonicalBegin) return;
 
-  function storedSessionSnapshot(){
-    let id = null;
-    let startValue = null;
-    try{
-      id = sessionStorage.getItem(SESSION_KEY);
-      startValue = sessionStorage.getItem(SESSION_START_KEY);
-    }catch(_e){}
-    if(id && !startValue) startValue = parseSessionStartFromId(id);
-    return {id, startValue};
-  }
+    let tapCount = 0;
+    let tapResetTimer = null;
 
-  function storedSessionIsLive(snapshot){
-    if(!snapshot || !snapshot.id || !snapshot.startValue) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    if(!Number.isFinite(startMs)) return false;
-    const now = Date.now();
-    return now >= (startMs - SESSION_EARLY_MS) &&
-           now <= (startMs + SESSION_LATE_MS);
-  }
+    trigger.addEventListener("click", () => {
+      tapCount += 1;
+      clearTimeout(tapResetTimer);
+      tapResetTimer = setTimeout(() => { tapCount = 0; }, 900);
+      if(tapCount < 3) return;
 
-  function storedSessionIsActuallyUnderway(snapshot){
-    if(!storedSessionIsLive(snapshot)) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    return Number.isFinite(startMs) && Date.now() >= startMs;
-  }
-
-  function clearStoredIntercomSession(){
-    try{
-      sessionStorage.removeItem(SESSION_KEY);
-      sessionStorage.removeItem(SESSION_START_KEY);
-      sessionStorage.removeItem(BLUE_ARMED_KEY);
-    }catch(_e){}
-  }
-
-  function saveIntercomSession(id, startValue){
-    try{
-      sessionStorage.setItem(SESSION_KEY, id);
-      sessionStorage.setItem(SESSION_START_KEY, startValue);
-    }catch(_e){}
-  }
-  const HEARTBEAT_MS = 8000;
-  const POLL_MS = 2500;
-
-  let sessionId = null;
-  let peer = null;
-  let peerId = null;
-  let call = null;
-  let heartbeatTimer = null;
-  let pollTimer = null;
-  let started = false;
-
-  const btn = document.getElementById("isoListenBtn");
-  const status = document.getElementById("isoBlueStatus");
-  const begin = document.getElementById("playButton");
-  const startField = document.getElementById("startTime");
-  let intercomStartDirty = false;
-  if(startField){
-    const markNewShow = () => {
-      intercomStartDirty = true;
-      try{ sessionStorage.removeItem(BLUE_ARMED_KEY); }catch(_e){}
-    };
-    startField.addEventListener("input", markNewShow);
-    startField.addEventListener("change", markNewShow);
-  }
-  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
-  const intercomTimingDiag = document.getElementById("intercomTimingDiagnostics");
-  const intercomLive = document.getElementById("intercomLive");
-  let intercomStatsTimer = null;
-  let intercomStatsSamples = 0;
-  let intercomRecentJbSumMs = 0;
-  let intercomRecentJitterSumMs = 0;
-  let lastJbDelay = null;
-  let lastJbCount = null;
-
-  let liveWatchdogTimer = null;
-  let liveLastPackets = null;
-  let liveLastAdvanceMs = 0;
-
-  let managerBroadcastActive = false;
-  let managerBroadcastStateKnown = false;
-
-  // Audience-facing broadcast duck: -25 dB total relative to the soundtrack's
-  // current level. This intentionally restores the earlier deep "dunk" behavior
-  // that fell out during the persistent-intercom rewrite.
-  const INTERCOM_DUCK_DB = -25;
-  const INTERCOM_DUCK_FACTOR = Math.pow(10, INTERCOM_DUCK_DB / 20);
-  const DUCK_DOWN_MS = 120;
-  const DUCK_UP_MS = 180;
-  let duckAnimationFrame = null;
-  let ducked = false;
-  let duckRestoreLevels = null;
-
-  function activeProgramAudioElements(){
-    return [
-      document.getElementById("audio"),
-      document.getElementById("preshowAudio")
-    ].filter(Boolean);
-  }
-
-  function cancelDuckAnimation(){
-    if(duckAnimationFrame) cancelAnimationFrame(duckAnimationFrame);
-    duckAnimationFrame = null;
-  }
-
-  function animateVolumes(targets, durationMs){
-    cancelDuckAnimation();
-    const started = performance.now();
-    const starts = targets.map(({el}) => el.volume);
-
-    const step = now => {
-      const p = Math.min(1, (now - started) / durationMs);
-      targets.forEach(({el, volume}, i) => {
-        const from = starts[i];
-        el.volume = from + (volume - from) * p;
-      });
-
-      if(p < 1){
-        duckAnimationFrame = requestAnimationFrame(step);
-      }else{
-        duckAnimationFrame = null;
-      }
-    };
-
-    duckAnimationFrame = requestAnimationFrame(step);
-  }
-
-  function setSoundtrackDucked(active){
-    const els = activeProgramAudioElements();
-
-    if(active){
-      if(ducked) return;
-      ducked = true;
-      duckRestoreLevels = new Map();
-
-      const targets = els.map(el => {
-        const base = el.volume;
-        duckRestoreLevels.set(el, base);
-        return {el, volume: Math.max(0, Math.min(1, base * INTERCOM_DUCK_FACTOR))};
-      });
-
-      animateVolumes(targets, DUCK_DOWN_MS);
-    }else{
-      if(!ducked) return;
-      ducked = false;
-
-      const targets = els.map(el => ({
-        el,
-        volume: duckRestoreLevels && duckRestoreLevels.has(el)
-          ? duckRestoreLevels.get(el)
-          : el.volume
-      }));
-
-      animateVolumes(targets, DUCK_UP_MS);
-      duckRestoreLevels = null;
-    }
-  }
-
-  let audioEl = document.getElementById("isoRemoteAudio");
-  if(!audioEl){
-    audioEl = document.createElement("audio");
-    audioEl.id = "isoRemoteAudio";
-    audioEl.autoplay = true;
-    audioEl.playsInline = true;
-    audioEl.style.display = "none";
-    document.body.appendChild(audioEl);
-  }
-
-  function intercomChannelForStartValue(value){
-    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
-    return clean ? `common-v6-${clean}` : null;
-  }
-
-  function freezeSession(value){
-    const requested = intercomChannelForStartValue(value);
-    const snapshot = storedSessionSnapshot();
-
-    let wasBlueArmed = false;
-    try{ wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1"; }catch(_e){}
-
-    const exactRunningRejoin =
-      wasBlueArmed &&
-      storedSessionIsActuallyUnderway(snapshot) &&
-      snapshot.startValue === value;
-
-    if(exactRunningRejoin){
-      sessionId = snapshot.id;
-      if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
-    }else{
-      // Audience rule: Begin always honors the Start Time visibly shown on screen.
-      // A stale earlier session may never silently replace it.
-      clearStoredIntercomSession();
-      sessionId = requested;
-      if(sessionId) saveIntercomSession(sessionId, value);
-    }
-
-    if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
-    return sessionId;
-  }
-
-  // Before Begin, the freshly generated visible Start Time is authoritative.
-  // We keep old storage only as metadata for an exact mid-show rejoin; we never
-  // rewrite the field behind the audience's back.
-  try{
-    const snapshot = storedSessionSnapshot();
-    const wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1";
-    const visibleValue = startField && startField.value;
-    const exactRunningRejoin =
-      wasBlueArmed &&
-      storedSessionIsActuallyUnderway(snapshot) &&
-      snapshot.startValue === visibleValue;
-
-    if(exactRunningRejoin){
-      sessionId = snapshot.id;
-      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
-    }else{
-      sessionId = null;
-      const proposed = intercomChannelForStartValue(visibleValue);
-      if(sessionDiag) sessionDiag.textContent =
-        "Session: " + (proposed || "—") + " (proposed)";
-    }
-  }catch(_e){}
-
-  const set = t => { if(status) status.textContent = t; };
-
-  async function registry(path="", options={}){
-    if(!sessionId) throw new Error("No intercom session");
-    const url = `${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}${path}`;
-    const response = await fetch(url, {
-      cache:"no-store",
-      ...options,
-      headers:{"Content-Type":"application/json", ...(options.headers||{})}
+      tapCount = 0;
+      clearTimeout(tapResetTimer);
+      const opening = !panel.classList.contains("open");
+      panel.classList.toggle("open", opening);
+      panel.setAttribute("aria-hidden", opening ? "false" : "true");
+      if(opening) testInput.focus();
     });
-    if(!response.ok) throw new Error(`Registry ${response.status}`);
-    return await response.json();
-  }
 
-  async function heartbeat(){
-    if(!peerId || !sessionId) return;
-    try{
-      await registry("/receiver", {
-        method:"POST",
-        body:JSON.stringify({peerId})
-      });
-    }catch(_e){
-      set("Receiver registered locally · registry retrying…");
-    }
-  }
-
-  async function pollSession(){
-    if(!sessionId || !peerId) return;
-    try{
-      const state = await registry("");
-      const managerText = state.managerPresent ? "manager online" : "waiting for manager";
-      if(!call) set(`Receiver registered · ${managerText}`);
-    }catch(_e){
-      if(!call) set("Receiver registered · registry reconnecting…");
-    }
-  }
-
-  function clearTimers(){
-    if(heartbeatTimer) clearInterval(heartbeatTimer);
-    if(pollTimer) clearInterval(pollTimer);
-    heartbeatTimer = null;
-    pollTimer = null;
-  }
-
-  async function registerReceiver(){
-    await heartbeat();
-    await pollSession();
-    clearTimers();
-    heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
-    pollTimer = setInterval(pollSession, POLL_MS);
-  }
-
-
-
-  function setIntercomLive(active){
-    if(intercomLive) intercomLive.classList.toggle("active", !!active);
-  }
-
-  function stopLiveWatchdog(){
-    if(liveWatchdogTimer) clearInterval(liveWatchdogTimer);
-    liveWatchdogTimer = null;
-    liveLastPackets = null;
-    liveLastAdvanceMs = 0;
-  }
-
-  async function sampleLivePackets(c){
-    const pc = c && c.peerConnection;
-    if(!pc || typeof pc.getStats !== "function") return;
-
-    try{
-      const report = await pc.getStats();
-      let packets = null;
-      report.forEach(stat => {
-        if(stat.type === "inbound-rtp" &&
-           stat.kind === "audio" &&
-           !stat.isRemote &&
-           Number.isFinite(stat.packetsReceived)){
-          packets = stat.packetsReceived;
-        }
-      });
-
-      if(packets == null) return;
-
-      if(liveLastPackets == null || packets > liveLastPackets){
-        liveLastPackets = packets;
-        liveLastAdvanceMs = Date.now();
-        // Persistent muted calls continue to carry RTP. The Manager's explicit
-        // broadcast-state message is authoritative for the audience-facing LIVE badge.
-        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
-      }else if(liveLastAdvanceMs && Date.now() - liveLastAdvanceMs > 2500){
-        setIntercomLive(false);
-      }
-    }catch(_e){}
-  }
-
-  function startLiveWatchdog(c){
-    stopLiveWatchdog();
-    liveLastAdvanceMs = Date.now();
-    sampleLivePackets(c);
-    liveWatchdogTimer = setInterval(() => sampleLivePackets(c), 750);
-  }
-
-  function stopIntercomStats(){
-    if(intercomStatsTimer) clearInterval(intercomStatsTimer);
-    intercomStatsTimer = null;
-    lastJbDelay = null;
-    lastJbCount = null;
-  }
-
-  function fmtMs(value){
-    return Number.isFinite(value) ? `${Math.round(value)} ms` : "—";
-  }
-
-  async function sampleIntercomStats(c){
-    const pc = c && c.peerConnection;
-    if(!pc || typeof pc.getStats !== "function"){
-      if(intercomTimingDiag) intercomTimingDiag.textContent =
-        "Intercom timing — browser stats unavailable";
-      return;
-    }
-    try{
-      const report = await pc.getStats();
-      let inbound = null;
-      let pair = null;
-      report.forEach(stat => {
-        if(stat.type === "inbound-rtp" && stat.kind === "audio" && !stat.isRemote) inbound = stat;
-        if(stat.type === "candidate-pair" && stat.state === "succeeded" && stat.nominated) pair = stat;
-      });
-      if(!inbound){
-        if(intercomTimingDiag) intercomTimingDiag.textContent =
-          "Intercom timing — waiting for RTP stats";
+    testBegin.addEventListener("click", () => {
+      if(!testInput.value){
+        testInput.focus();
         return;
       }
-
-      const jitterMs = Number.isFinite(inbound.jitter) ? inbound.jitter * 1000 : null;
-      let cumulativeJbMs = null;
-      if(Number.isFinite(inbound.jitterBufferDelay) &&
-         Number.isFinite(inbound.jitterBufferEmittedCount) &&
-         inbound.jitterBufferEmittedCount > 0){
-        cumulativeJbMs = (inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000;
-      }
-
-      let recentJbMs = null;
-      if(Number.isFinite(inbound.jitterBufferDelay) &&
-         Number.isFinite(inbound.jitterBufferEmittedCount) &&
-         lastJbDelay != null && lastJbCount != null){
-        const dDelay = inbound.jitterBufferDelay - lastJbDelay;
-        const dCount = inbound.jitterBufferEmittedCount - lastJbCount;
-        if(dCount > 0 && dDelay >= 0) recentJbMs = (dDelay / dCount) * 1000;
-      }
-      if(Number.isFinite(inbound.jitterBufferDelay)) lastJbDelay = inbound.jitterBufferDelay;
-      if(Number.isFinite(inbound.jitterBufferEmittedCount)) lastJbCount = inbound.jitterBufferEmittedCount;
-
-      intercomStatsSamples += 1;
-      if(Number.isFinite(recentJbMs)) intercomRecentJbSumMs += recentJbMs;
-      if(Number.isFinite(jitterMs)) intercomRecentJitterSumMs += jitterMs;
-
-      const avgRecentJbMs = intercomStatsSamples > 0 ? intercomRecentJbSumMs / intercomStatsSamples : null;
-      const avgJitterMs = intercomStatsSamples > 0 ? intercomRecentJitterSumMs / intercomStatsSamples : null;
-      const packetsReceived = Number.isFinite(inbound.packetsReceived) ? inbound.packetsReceived : 0;
-      const packetsLost = Number.isFinite(inbound.packetsLost) ? inbound.packetsLost : 0;
-      const packetsDiscarded = Number.isFinite(inbound.packetsDiscarded) ? inbound.packetsDiscarded : null;
-      const concealed = Number.isFinite(inbound.concealedSamples) ? inbound.concealedSamples : null;
-      const totalSamples = Number.isFinite(inbound.totalSamplesReceived) ? inbound.totalSamplesReceived : null;
-      const concealPct = concealed != null && totalSamples > 0 ? (concealed / totalSamples) * 100 : null;
-      const rttMs = pair && Number.isFinite(pair.currentRoundTripTime) ? pair.currentRoundTripTime * 1000 : null;
-
-      const line1 =
-        `Intercom timing — JB now ${fmtMs(recentJbMs)} · JB avg ${fmtMs(avgRecentJbMs)} · ` +
-        `JB total ${fmtMs(cumulativeJbMs)} · jitter ${fmtMs(jitterMs)} (avg ${fmtMs(avgJitterMs)})`;
-      const line2 = [
-        `Packets ${packetsReceived}`,
-        `loss ${packetsLost}`,
-        packetsDiscarded != null ? `discard ${packetsDiscarded}` : null,
-        concealPct != null ? `conceal ${concealPct.toFixed(2)}%` : null,
-        rttMs != null ? `RTT ${fmtMs(rttMs)}` : null,
-        `PC ${pc.connectionState || "—"}`,
-        `ICE ${pc.iceConnectionState || "—"}`
-      ].filter(Boolean).join(" · ");
-
-      if(intercomTimingDiag) intercomTimingDiag.innerHTML = `${line1}<br>${line2}`;
-    }catch(_e){
-      if(intercomTimingDiag) intercomTimingDiag.textContent =
-        "Intercom timing — stats read failed";
-    }
-  }
-
-  function startIntercomStats(c){
-    stopIntercomStats();
-    intercomStatsSamples = 0;
-    intercomRecentJbSumMs = 0;
-    intercomRecentJitterSumMs = 0;
-    if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — collecting…";
-    sampleIntercomStats(c);
-    intercomStatsTimer = setInterval(() => sampleIntercomStats(c), 2000);
-  }
-
-  function attachCallHandlers(c){
-    if(call && call !== c){
-      try{ call.close(); }catch(_e){}
-    }
-    call = c;
-    set("Media call received…");
-    c.answer();
-    startIntercomStats(c);
-
-    c.on("stream", async stream => {
-      // Leave the silent autoplay-prime state and restore actual intercom level.
-      audioEl.pause();
-      audioEl.loop = false;
-      audioEl.volume = 1;
-      audioEl.src = "";
-      audioEl.srcObject = stream;
-
-      const track = stream.getAudioTracks && stream.getAudioTracks()[0];
-      if(track){
-        track.addEventListener("ended", () => setIntercomLive(false), {once:true});
-        track.addEventListener("mute", () => setIntercomLive(false));
-        track.addEventListener("unmute", () => setIntercomLive(true));
-      }
-
-      startLiveWatchdog(c);
-
-      try{
-        await audioEl.play();
-        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
-        set(managerBroadcastActive
-          ? "LIVE — receiving audio"
-          : "Intercom media ready · waiting for broadcast");
-      }catch(_e){
-        setIntercomLive(false);
-        set("Intercom audio waiting for user gesture");
-      }
+      canonicalInput.value = testInput.value;
+      canonicalBegin.click();
     });
-
-    const finish = () => {
-      if(call === c) call = null;
-      managerBroadcastActive = false;
-      managerBroadcastStateKnown = false;
-      setSoundtrackDucked(false);
-      stopIntercomStats();
-      stopLiveWatchdog();
-      setIntercomLive(false);
-      if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — broadcast ended";
-      try{
-        audioEl.pause();
-        audioEl.srcObject = null;
-      }catch(_e){}
-      pollSession();
-    };
-    c.on("close", finish);
-    c.on("error", finish);
-  }
-
-  function startPeer(){
-    if(peer) return;
-    if(!window.Peer){ set("PeerJS unavailable"); return; }
-    set("Opening receiver…");
-    peer = new Peer();
-
-    peer.on("open", async id => {
-      peerId = id;
-      set("Receiver open · registering session…");
-      await registerReceiver();
-    });
-
-    peer.on("call", attachCallHandlers);
-
-    peer.on("connection", controlConn => {
-      controlConn.on("data", data => {
-        if(!data || data.type !== "broadcast-state") return;
-        managerBroadcastStateKnown = true;
-        managerBroadcastActive = !!data.active;
-        setIntercomLive(managerBroadcastActive);
-        setSoundtrackDucked(managerBroadcastActive);
-
-        if(managerBroadcastActive){
-          set("LIVE — receiving audio");
-        }else{
-          set("Receiver registered · manager online");
-        }
-      });
-
-      controlConn.on("close", () => {
-        // Media may remain alive through signaling churn; avoid showing stale LIVE.
-        managerBroadcastActive = false;
-        setIntercomLive(false);
-        setSoundtrackDucked(false);
-      });
-
-      controlConn.on("error", () => {
-        managerBroadcastActive = false;
-        setIntercomLive(false);
-        setSoundtrackDucked(false);
-      });
-    });
-
-    peer.on("disconnected", () => {
-      set("Receiver signaling reconnecting…");
-      try{ peer.reconnect(); }catch(_e){}
-    });
-
-    peer.on("error", e => {
-      const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
-      if(kind === "network"){
-        set("Receiver network warning · retrying…");
-      }else{
-        set("Receiver peer warning: " + kind);
-      }
-    });
-  }
-
-  btn.addEventListener("click", () => {
-    if(started) return;
-    started = true;
-    startPeer();
-  });
-
-  const programAudio = document.getElementById("audio");
-  if(programAudio){
-    programAudio.addEventListener("ended", () => {
-      try{
-        sessionStorage.removeItem(SESSION_KEY);
-        sessionStorage.removeItem(SESSION_START_KEY);
-        sessionStorage.removeItem(BLUE_ARMED_KEY);
-      }catch(_e){}
-      sessionId = null;
-      setSoundtrackDucked(false);
-      if(sessionDiag) sessionDiag.textContent = "Session: —";
-      const baseDiag = document.getElementById("intercomDiagnostics");
-      if(baseDiag) baseDiag.textContent = "Intercom — show ended";
-    });
-  }
-  const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
-
-  if(begin && btn){
-    begin.addEventListener("click", () => {
-      try{
-        const snapshot = storedSessionSnapshot();
-        const visibleValue = startField && startField.value;
-        const exactRunningRejoin =
-          sessionStorage.getItem(BLUE_ARMED_KEY) === "1" &&
-          storedSessionIsActuallyUnderway(snapshot) &&
-          snapshot.startValue === visibleValue;
-
-        if(!exactRunningRejoin){
-          sessionStorage.removeItem(BLUE_ARMED_KEY);
-          sessionStorage.removeItem(SESSION_KEY);
-          sessionStorage.removeItem(SESSION_START_KEY);
-        }
-      }catch(_e){}
-
-      const armed = freezeSession(startField && startField.value);
-      const baseDiag = document.getElementById("intercomDiagnostics");
-      if(baseDiag) baseDiag.textContent = armed
-        ? "Intercom — session armed"
-        : "Intercom — session not armed";
-      if(armed){
-        try{ sessionStorage.setItem(BLUE_ARMED_KEY, "1"); }catch(_e){}
-      }
-      if(!armed){
-        set("Intercom session needs a Start Time");
-        return;
-      }
-
-      try{
-        audioEl.srcObject = null;
-        audioEl.src = SILENT_WAV;
-        audioEl.loop = true;
-        audioEl.volume = 0.0001;
-        const p = audioEl.play();
-        if(p && typeof p.catch === "function") p.catch(()=>{});
-      }catch(_e){}
-
-      btn.click();
-    }, {once:true, capture:true});
-  }
-
-  window.addEventListener("pagehide", () => {
-    if(peerId && sessionId){
-      fetch(`${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}/receiver/${encodeURIComponent(peerId)}`, {
-        method:"DELETE",
-        keepalive:true
-      }).catch(()=>{});
-    }
-  });
-})();
-</script>
+  })();
+  </script>
 
 </body>
 </html>
