@@ -2296,22 +2296,10 @@
       let retargetCount = 0;
 
       while(true){
-        const rawExpectedAtAssignmentSec = getExpectedTrackTimeSec();
-
-        // v4.99: startup seek safety guard. If the canonical clock suddenly
-        // reports that this newly starting performance is at/after the end of
-        // the soundtrack, do NOT clamp that bad value to duration - 0.05.
-        // On affected iPhones that can produce a few frames of audio followed
-        // immediately by the genuine media `ended` event and the credits.
-        // Reject the anomalous startup target instead; the caller can retry
-        // without disturbing the normal sync/drift path on healthy devices.
-        if(!Number.isFinite(rawExpectedAtAssignmentSec) ||
-           rawExpectedAtAssignmentSec < 0 ||
-           rawExpectedAtAssignmentSec >= audio.duration){
-          throw new Error(`Startup clock target out of range: ${rawExpectedAtAssignmentSec}`);
-        }
-
-        const expectedAtAssignmentSec = rawExpectedAtAssignmentSec;
+        const expectedAtAssignmentSec = Math.max(
+          0,
+          Math.min(getExpectedTrackTimeSec() || 0, audio.duration - 0.05)
+        );
         const targetSec = Math.min(
           expectedAtAssignmentSec + startupCalibrationBiasSec,
           audio.duration - 0.05
@@ -2322,13 +2310,10 @@
         await waitForSeek();
         timingOp.seekedAtMs = highResNowMs();
 
-        const rawExpectedAfterSeekSec = getExpectedTrackTimeSec();
-        if(!Number.isFinite(rawExpectedAfterSeekSec) ||
-           rawExpectedAfterSeekSec < 0 ||
-           rawExpectedAfterSeekSec >= audio.duration){
-          throw new Error(`Startup clock retarget out of range: ${rawExpectedAfterSeekSec}`);
-        }
-        const expectedAfterSeekSec = rawExpectedAfterSeekSec;
+        const expectedAfterSeekSec = Math.max(
+          0,
+          Math.min(getExpectedTrackTimeSec() || 0, audio.duration - 0.05)
+        );
         const targetAgeSec = Math.max(0, expectedAfterSeekSec - expectedAtAssignmentSec);
         const targetAgeMs = Math.round(targetAgeSec * 1000);
 
@@ -3206,7 +3191,50 @@
 
     audio.addEventListener("pause", handleUnexpectedPerformancePause);
 
-    audio.addEventListener("ended", ()=>{
+    // Sanity-check native media "ended" before allowing it to end Common.
+    // Some iPhones appear able to emit a premature ended event during startup/seek.
+    // The canonical show clock is the authority: an ended event is accepted only
+    // when both the scheduled timeline and the media playhead are genuinely near
+    // the end of the loaded program. Otherwise we treat it as spurious and recover.
+    audio.addEventListener("ended", async ()=>{
+      const expectedSec = getExpectedTrackTimeSec();
+      const durationSec = Number(audio.duration);
+      const currentSec = Number(audio.currentTime);
+      const END_SANITY_MARGIN_SEC = 3;
+
+      const durationKnown = Number.isFinite(durationSec) && durationSec > 0;
+      const expectedNearEnd = durationKnown && Number.isFinite(expectedSec) &&
+        expectedSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const playheadNearEnd = durationKnown && Number.isFinite(currentSec) &&
+        currentSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const acceptEnded = durationKnown && expectedNearEnd && playheadNearEnd;
+
+      if(!acceptEnded){
+        const expectedText = Number.isFinite(expectedSec) ? expectedSec.toFixed(2) : "—";
+        const currentText = Number.isFinite(currentSec) ? currentSec.toFixed(2) : "—";
+        const durationText = durationKnown ? durationSec.toFixed(2) : "—";
+
+        setStatus("Recovering playback…");
+        setDebug(`${lastClockSyncDebug || "Clock prepared"} · Ignored premature ended event · expected ${expectedText}s · media ${currentText}s / ${durationText}s`);
+
+        // Do not dismantle timers, the frozen clock, or post-show state.
+        // Recover against the same canonical timeline used everywhere else.
+        if(scheduledAnchorMs != null){
+          try{
+            const recovered = await startPlaybackAtCurrentCorrectOffset();
+            if(!recovered) showStartNow();
+          }catch(err){
+            setStatus("Playback interrupted — tap Begin");
+            setDebug(`${lastClockSyncDebug || "Clock prepared"} · Premature ended recovery failed: ${err.message}`);
+            showStartNow();
+          }
+        }else{
+          setStatus("Playback interrupted — tap Begin");
+          showStartNow();
+        }
+        return;
+      }
+
       clearTimers();
       clearPlaybackMonitors();
       clearCrossfade();
@@ -3219,7 +3247,7 @@
 
       setCountdown("");
       setStatus("Playback ended");
-      setDebug(lastClockSyncDebug || "");
+      setDebug(`${lastClockSyncDebug || ""} · End verified by clock + playhead.`);
 
       showPlayer();
       updateTransport();
