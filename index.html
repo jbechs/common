@@ -581,7 +581,7 @@
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
 <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v7</div>
+      <div class="subtitle">PERFORMER (v8)</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -711,7 +711,7 @@
 
   <script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
   <script> 
-    const AUDIO_URL = "https://eggtooth.xyz/commonseptember2.mp3";
+    const AUDIO_URL = "https://eggtooth.xyz/commonperformerseptember2.mp3";
     const PRESHOW_AUDIO_URL = "https://eggtooth.xyz/preshow.mp3";
     const TIME_SERVER_URL = "https://sync1.jbechs.workers.dev/";
     // Ratings endpoint: deploy the companion Worker, then replace this URL with its workers.dev URL.
@@ -2816,11 +2816,23 @@
         const reachedPostShow = sessionStorage.getItem(postShowStorageKey()) === "1";
         if(!reachedPostShow) return false;
 
-        postShowStarted = true;
-        postShowBlackout.classList.add("active");
-        postShowScreen.classList.add("visible");
-        postShowScreen.setAttribute("aria-hidden", "false");
-        return true;
+        // A refresh from a completed performance means "start fresh," not
+        // "restore credits." Retire this run, clear its show/intercom state,
+        // and return to the clean base URL. A new run token will be created
+        // only when the user prepares the next performance.
+        const completedRunId = commonRunId;
+        sessionStorage.removeItem(postShowStorageKey());
+        sessionStorage.removeItem(`commonPerformanceSession:${completedRunId}`);
+        sessionStorage.removeItem("commonIntercomSession");
+        sessionStorage.removeItem("commonIntercomSessionStart");
+        sessionStorage.removeItem("commonIntercomBlueArmed");
+        commonRunId = null;
+        commonPerformanceSessionId = null;
+
+        const cleanUrl = new URL(window.location.href);
+        cleanUrl.searchParams.delete("run");
+        window.history.replaceState(null, "", cleanUrl.toString());
+        return false;
       }catch(err){
         // Persistence is convenience-only; never interfere with Common if storage is unavailable.
         return false;
@@ -3112,6 +3124,9 @@
     });
 
     playButton.addEventListener("click", ()=>{
+      // After a completed-show refresh we intentionally sit at the clean base URL
+      // with no run token. Create the next run only when a new performance is prepared.
+      if(!commonRunId) establishCommonRun();
       handlePrepare(false);
     });
     startNowButton.addEventListener("click", ()=>{
@@ -3197,7 +3212,50 @@
 
     audio.addEventListener("pause", handleUnexpectedPerformancePause);
 
-    audio.addEventListener("ended", ()=>{
+    // Sanity-check native media "ended" before allowing it to end Common.
+    // Some iPhones appear able to emit a premature ended event during startup/seek.
+    // The canonical show clock is the authority: an ended event is accepted only
+    // when both the scheduled timeline and the media playhead are genuinely near
+    // the end of the loaded program. Otherwise we treat it as spurious and recover.
+    audio.addEventListener("ended", async ()=>{
+      const expectedSec = getExpectedTrackTimeSec();
+      const durationSec = Number(audio.duration);
+      const currentSec = Number(audio.currentTime);
+      const END_SANITY_MARGIN_SEC = 3;
+
+      const durationKnown = Number.isFinite(durationSec) && durationSec > 0;
+      const expectedNearEnd = durationKnown && Number.isFinite(expectedSec) &&
+        expectedSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const playheadNearEnd = durationKnown && Number.isFinite(currentSec) &&
+        currentSec >= durationSec - END_SANITY_MARGIN_SEC;
+      const acceptEnded = durationKnown && expectedNearEnd && playheadNearEnd;
+
+      if(!acceptEnded){
+        const expectedText = Number.isFinite(expectedSec) ? expectedSec.toFixed(2) : "—";
+        const currentText = Number.isFinite(currentSec) ? currentSec.toFixed(2) : "—";
+        const durationText = durationKnown ? durationSec.toFixed(2) : "—";
+
+        setStatus("Recovering playback…");
+        setDebug(`${lastClockSyncDebug || "Clock prepared"} · Ignored premature ended event · expected ${expectedText}s · media ${currentText}s / ${durationText}s`);
+
+        // Do not dismantle timers, the frozen clock, or post-show state.
+        // Recover against the same canonical timeline used everywhere else.
+        if(scheduledAnchorMs != null){
+          try{
+            const recovered = await startPlaybackAtCurrentCorrectOffset();
+            if(!recovered) showStartNow();
+          }catch(err){
+            setStatus("Playback interrupted — tap Begin");
+            setDebug(`${lastClockSyncDebug || "Clock prepared"} · Premature ended recovery failed: ${err.message}`);
+            showStartNow();
+          }
+        }else{
+          setStatus("Playback interrupted — tap Begin");
+          showStartNow();
+        }
+        return;
+      }
+
       clearTimers();
       clearPlaybackMonitors();
       clearCrossfade();
@@ -3210,7 +3268,7 @@
 
       setCountdown("");
       setStatus("Playback ended");
-      setDebug(lastClockSyncDebug || "");
+      setDebug(`${lastClockSyncDebug || ""} · End verified by clock + playhead.`);
 
       showPlayer();
       updateTransport();
@@ -3827,16 +3885,12 @@
   const programAudio = document.getElementById("audio");
   if(programAudio){
     programAudio.addEventListener("ended", () => {
-      try{
-        sessionStorage.removeItem(SESSION_KEY);
-        sessionStorage.removeItem(SESSION_START_KEY);
-        sessionStorage.removeItem(BLUE_ARMED_KEY);
-      }catch(_e){}
-      sessionId = null;
+      // Keep the intercom session alive through the post-show/credits state.
+      // The next performance's Begin path remains the hard session boundary:
+      // a different Start Time clears the old stored session before arming the new one.
       setSoundtrackDucked(false);
-      if(sessionDiag) sessionDiag.textContent = "Session: —";
       const baseDiag = document.getElementById("intercomDiagnostics");
-      if(baseDiag) baseDiag.textContent = "Intercom — show ended";
+      if(baseDiag) baseDiag.textContent = "Intercom — post-show available";
     });
   }
   const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
