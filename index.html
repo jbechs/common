@@ -581,7 +581,7 @@
     <div id="intercomLive" class="intercomLive" aria-live="polite">● LIVE</div>
 <div class="header">
       <h1>common</h1>
-      <div class="subtitle">v8</div>
+      <div class="subtitle">v9</div>
     </div>
 
     <label for="startTime">Start Time</label>
@@ -595,12 +595,17 @@
     <div id="transport" class="transport">00:00 / 00:00 · drift 0 ms</div>
     <button id="diagnosticsToggle" class="diagnosticsToggle" type="button" aria-expanded="false">info</button>
     <div id="diagnosticsPanel" class="diagnosticsPanel hidden">
+      <div id="v9AudioHealth" class="timingProbe">V9 audio: awaiting connection</div>
+      <div id="v9AudioEvents" class="timingProbe" style="white-space:pre-wrap;overflow-wrap:anywhere">Recent audio events: none</div>
+
       <div id="driftStats" class="debug">Initial — · Avg — · Best — · Worst —<br>Hard seeks 0 · Last —</div>
       <div id="timingProbe" class="timingProbe">Timing probe — waiting for playback</div>
       <div id="debug" class="debug"></div>
       <div id="intercomDiagnostics" class="timingProbe">Intercom — session not armed</div>
       <div id="intercomTimingDiagnostics" class="timingProbe">Intercom timing — waiting for live audio</div>
       <div id="intercomSessionDiagnostics" class="timingProbe">Session: —</div>
+      <div id="v9ParticipantDiagnostics" class="timingProbe">Participant Number: —</div>
+      <div id="v9OverlayDiagnostics" class="timingProbe">Overlay: waiting for manifest</div>
     </div>
 
 
@@ -1864,6 +1869,9 @@
 
       return Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
     }
+
+    // Read-only access for V9 overlay scheduling, never writes to the backbone engine.
+    window.commonV9ReadShowTimeSec = getExpectedTrackTimeSec;
 
     function getCurrentDriftSec(){
       const expected = getExpectedTrackTimeSec();
@@ -3326,628 +3334,263 @@
   <button id="isoListenBtn" type="button" style="display:none">Listen</button>
   <div id="isoBlueStatus" style="margin-top:8px;font-size:.85rem;opacity:.8">Intercom ready</div>
 </div>
+<!-- V9 LiveKit listener replaces legacy V8 PeerJS receiver -->
+
+
+<!-- V9 participant identity only. Never touches the backbone audio or sync engine. -->
 <script>
 (() => {
-  const REGISTRY_BASE = 'https://common-rendezvous.jbechs.workers.dev';
-  const SESSION_KEY = 'common-v6-intercom-session';
-
-  const SESSION_START_KEY = "common-v6-intercom-start-value";
-  const SESSION_EARLY_MS = 10 * 60 * 1000;
-  const SESSION_LATE_MS = 30 * 60 * 1000;
-
-  function parseSessionStartFromId(id){
-    const m = String(id || "").match(/^common-v6-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})$/);
-    if(!m) return null;
-    const [, y, mo, d, h, mi] = m;
-    return `${y}-${mo}-${d}T${h}:${mi}`;
+  const V9_REGISTRY_BASE = 'https://common-rendezvous-v9.jbechs.workers.dev'; // Deploy separate test Worker first.
+  const start = document.getElementById('startTime');
+  const diag = document.getElementById('v9ParticipantDiagnostics');
+  let lastId = null;
+  let successfulId = null;
+  let registering = false;
+  let armed = false;
+  function set(text) { if (diag) diag.textContent = 'Participant Number: ' + text; }
+  function sessionId() {
+    const value = start?.value || '';
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? 'common-v6-' + value.replace(/[-:]/g, '') : null;
   }
-
-  function storedSessionSnapshot(){
-    let id = null;
-    let startValue = null;
-    try{
-      id = sessionStorage.getItem(SESSION_KEY);
-      startValue = sessionStorage.getItem(SESSION_START_KEY);
-    }catch(_e){}
-    if(id && !startValue) startValue = parseSessionStartFromId(id);
-    return {id, startValue};
-  }
-
-  function storedSessionIsLive(snapshot){
-    if(!snapshot || !snapshot.id || !snapshot.startValue) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    if(!Number.isFinite(startMs)) return false;
-    const now = Date.now();
-    return now >= (startMs - SESSION_EARLY_MS) &&
-           now <= (startMs + SESSION_LATE_MS);
-  }
-
-  function storedSessionIsActuallyUnderway(snapshot){
-    if(!storedSessionIsLive(snapshot)) return false;
-    const startMs = new Date(snapshot.startValue).getTime();
-    return Number.isFinite(startMs) && Date.now() >= startMs;
-  }
-
-  function clearStoredIntercomSession(){
-    try{
-      sessionStorage.removeItem(SESSION_KEY);
-      sessionStorage.removeItem(SESSION_START_KEY);
-      sessionStorage.removeItem(BLUE_ARMED_KEY);
-    }catch(_e){}
-  }
-
-  function saveIntercomSession(id, startValue){
-    try{
-      sessionStorage.setItem(SESSION_KEY, id);
-      sessionStorage.setItem(SESSION_START_KEY, startValue);
-    }catch(_e){}
-  }
-  const HEARTBEAT_MS = 8000;
-  const POLL_MS = 2500;
-
-  let sessionId = null;
-  let peer = null;
-  let peerId = null;
-  let call = null;
-  let heartbeatTimer = null;
-  let pollTimer = null;
-  let started = false;
-
-  const btn = document.getElementById("isoListenBtn");
-  const status = document.getElementById("isoBlueStatus");
-  const begin = document.getElementById("playButton");
-  const startField = document.getElementById("startTime");
-  let intercomStartDirty = false;
-  if(startField){
-    const markNewShow = () => {
-      intercomStartDirty = true;
-      try{ sessionStorage.removeItem(BLUE_ARMED_KEY); }catch(_e){}
-    };
-    startField.addEventListener("input", markNewShow);
-    startField.addEventListener("change", markNewShow);
-  }
-  const sessionDiag = document.getElementById("intercomSessionDiagnostics");
-  const intercomTimingDiag = document.getElementById("intercomTimingDiagnostics");
-  const intercomLive = document.getElementById("intercomLive");
-  let intercomStatsTimer = null;
-  let intercomStatsSamples = 0;
-  let intercomRecentJbSumMs = 0;
-  let intercomRecentJitterSumMs = 0;
-  let lastJbDelay = null;
-  let lastJbCount = null;
-
-  let liveWatchdogTimer = null;
-  let liveLastPackets = null;
-  let liveLastAdvanceMs = 0;
-
-  let managerBroadcastActive = false;
-  let managerBroadcastStateKnown = false;
-
-  // Audience-facing broadcast duck: -25 dB total relative to the soundtrack's
-  // current level. This intentionally restores the earlier deep "dunk" behavior
-  // that fell out during the persistent-intercom rewrite.
-  const INTERCOM_DUCK_DB = -25;
-  const INTERCOM_DUCK_FACTOR = Math.pow(10, INTERCOM_DUCK_DB / 20);
-  const DUCK_DOWN_MS = 120;
-  const DUCK_UP_MS = 180;
-  let duckAnimationFrame = null;
-  let ducked = false;
-  let duckRestoreLevels = null;
-
-  function activeProgramAudioElements(){
-    return [
-      document.getElementById("audio"),
-      document.getElementById("preshowAudio")
-    ].filter(Boolean);
-  }
-
-  function cancelDuckAnimation(){
-    if(duckAnimationFrame) cancelAnimationFrame(duckAnimationFrame);
-    duckAnimationFrame = null;
-  }
-
-  function animateVolumes(targets, durationMs){
-    cancelDuckAnimation();
-    const started = performance.now();
-    const starts = targets.map(({el}) => el.volume);
-
-    const step = now => {
-      const p = Math.min(1, (now - started) / durationMs);
-      targets.forEach(({el, volume}, i) => {
-        const from = starts[i];
-        el.volume = from + (volume - from) * p;
+  async function register() {
+    const id = sessionId();
+    if (!id || !armed || registering || id === successfulId) return;
+    if (id !== lastId) { lastId = id; set('registering…'); }
+    registering = true;
+    try {
+      const keyName = 'common-v9-participant-key:' + id;
+      let key = localStorage.getItem(keyName);
+      if (!key) { key = crypto.randomUUID(); localStorage.setItem(keyName, key); }
+      const response = await fetch(V9_REGISTRY_BASE + '/api/session/' + encodeURIComponent(id) + '/participant', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({participantKey:key}), cache: 'no-store'
       });
-
-      if(p < 1){
-        duckAnimationFrame = requestAnimationFrame(step);
-      }else{
-        duckAnimationFrame = null;
-      }
-    };
-
-    duckAnimationFrame = requestAnimationFrame(step);
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      if (!Number.isSafeInteger(data.participantNumber) || data.participantNumber < 1) throw new Error('Invalid participant number');
+      if (sessionId() === id) { successfulId = id; set(String(data.participantNumber)); window.commonV9Diag?.event('Participant number '+data.participantNumber+' assigned'); window.dispatchEvent(new CustomEvent('common-v9-participant-registered',{detail:{participantNumber:data.participantNumber, sessionId:id}})); }
+    } catch (error) { set('registration pending (' + error.message + ')'); }
+    finally { registering = false; }
   }
-
-  function setSoundtrackDucked(active){
-    const els = activeProgramAudioElements();
-
-    if(active){
-      if(ducked) return;
-      ducked = true;
-      duckRestoreLevels = new Map();
-
-      const targets = els.map(el => {
-        const base = el.volume;
-        duckRestoreLevels.set(el, base);
-        return {el, volume: Math.max(0, Math.min(1, base * INTERCOM_DUCK_FACTOR))};
-      });
-
-      animateVolumes(targets, DUCK_DOWN_MS);
-    }else{
-      if(!ducked) return;
-      ducked = false;
-
-      const targets = els.map(el => ({
-        el,
-        volume: duckRestoreLevels && duckRestoreLevels.has(el)
-          ? duckRestoreLevels.get(el)
-          : el.volume
-      }));
-
-      animateVolumes(targets, DUCK_UP_MS);
-      duckRestoreLevels = null;
-    }
-  }
-
-  let audioEl = document.getElementById("isoRemoteAudio");
-  if(!audioEl){
-    audioEl = document.createElement("audio");
-    audioEl.id = "isoRemoteAudio";
-    audioEl.autoplay = true;
-    audioEl.playsInline = true;
-    audioEl.style.display = "none";
-    document.body.appendChild(audioEl);
-  }
-
-  function intercomChannelForStartValue(value){
-    const clean = String(value || "").replace(/[^0-9A-Za-z]/g, "");
-    return clean ? `common-v6-${clean}` : null;
-  }
-
-  function freezeSession(value){
-    const requested = intercomChannelForStartValue(value);
-    const snapshot = storedSessionSnapshot();
-
-    let wasBlueArmed = false;
-    try{ wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1"; }catch(_e){}
-
-    const exactRunningRejoin =
-      wasBlueArmed &&
-      storedSessionIsActuallyUnderway(snapshot) &&
-      snapshot.startValue === value;
-
-    if(exactRunningRejoin){
-      sessionId = snapshot.id;
-      if(sessionId) saveIntercomSession(sessionId, snapshot.startValue);
-    }else{
-      // Audience rule: Begin always honors the Start Time visibly shown on screen.
-      // A stale earlier session may never silently replace it.
-      clearStoredIntercomSession();
-      sessionId = requested;
-      if(sessionId) saveIntercomSession(sessionId, value);
-    }
-
-    if(sessionDiag) sessionDiag.textContent = "Session: " + (sessionId || "—");
-    return sessionId;
-  }
-
-  // Before Begin, the freshly generated visible Start Time is authoritative.
-  // We keep old storage only as metadata for an exact mid-show rejoin; we never
-  // rewrite the field behind the audience's back.
-  try{
-    const snapshot = storedSessionSnapshot();
-    const wasBlueArmed = sessionStorage.getItem(BLUE_ARMED_KEY) === "1";
-    const visibleValue = startField && startField.value;
-    const exactRunningRejoin =
-      wasBlueArmed &&
-      storedSessionIsActuallyUnderway(snapshot) &&
-      snapshot.startValue === visibleValue;
-
-    if(exactRunningRejoin){
-      sessionId = snapshot.id;
-      if(sessionDiag) sessionDiag.textContent = "Session: " + snapshot.id + " (rejoin)";
-    }else{
-      sessionId = null;
-      const proposed = intercomChannelForStartValue(visibleValue);
-      if(sessionDiag) sessionDiag.textContent =
-        "Session: " + (proposed || "—") + " (proposed)";
-    }
-  }catch(_e){}
-
-  const set = t => { if(status) status.textContent = t; };
-
-  async function registry(path="", options={}){
-    if(!sessionId) throw new Error("No intercom session");
-    const url = `${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}${path}`;
-    const response = await fetch(url, {
-      cache:"no-store",
-      ...options,
-      headers:{"Content-Type":"application/json", ...(options.headers||{})}
-    });
-    if(!response.ok) throw new Error(`Registry ${response.status}`);
-    return await response.json();
-  }
-
-  async function heartbeat(){
-    if(!peerId || !sessionId) return;
-    try{
-      await registry("/receiver", {
-        method:"POST",
-        body:JSON.stringify({peerId})
-      });
-    }catch(_e){
-      set("Receiver registered locally · registry retrying…");
-    }
-  }
-
-  async function pollSession(){
-    if(!sessionId || !peerId) return;
-    try{
-      const state = await registry("");
-      const managerText = state.managerPresent ? "manager online" : "waiting for manager";
-      if(!call) set(`Receiver registered · ${managerText}`);
-    }catch(_e){
-      if(!call) set("Receiver registered · registry reconnecting…");
-    }
-  }
-
-  function clearTimers(){
-    if(heartbeatTimer) clearInterval(heartbeatTimer);
-    if(pollTimer) clearInterval(pollTimer);
-    heartbeatTimer = null;
-    pollTimer = null;
-  }
-
-  async function registerReceiver(){
-    await heartbeat();
-    await pollSession();
-    clearTimers();
-    heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
-    pollTimer = setInterval(pollSession, POLL_MS);
-  }
-
-
-
-  function setIntercomLive(active){
-    if(intercomLive) intercomLive.classList.toggle("active", !!active);
-  }
-
-  function stopLiveWatchdog(){
-    if(liveWatchdogTimer) clearInterval(liveWatchdogTimer);
-    liveWatchdogTimer = null;
-    liveLastPackets = null;
-    liveLastAdvanceMs = 0;
-  }
-
-  async function sampleLivePackets(c){
-    const pc = c && c.peerConnection;
-    if(!pc || typeof pc.getStats !== "function") return;
-
-    try{
-      const report = await pc.getStats();
-      let packets = null;
-      report.forEach(stat => {
-        if(stat.type === "inbound-rtp" &&
-           stat.kind === "audio" &&
-           !stat.isRemote &&
-           Number.isFinite(stat.packetsReceived)){
-          packets = stat.packetsReceived;
-        }
-      });
-
-      if(packets == null) return;
-
-      if(liveLastPackets == null || packets > liveLastPackets){
-        liveLastPackets = packets;
-        liveLastAdvanceMs = Date.now();
-        // Persistent muted calls continue to carry RTP. The Manager's explicit
-        // broadcast-state message is authoritative for the audience-facing LIVE badge.
-        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
-      }else if(liveLastAdvanceMs && Date.now() - liveLastAdvanceMs > 2500){
-        setIntercomLive(false);
-      }
-    }catch(_e){}
-  }
-
-  function startLiveWatchdog(c){
-    stopLiveWatchdog();
-    liveLastAdvanceMs = Date.now();
-    sampleLivePackets(c);
-    liveWatchdogTimer = setInterval(() => sampleLivePackets(c), 750);
-  }
-
-  function stopIntercomStats(){
-    if(intercomStatsTimer) clearInterval(intercomStatsTimer);
-    intercomStatsTimer = null;
-    lastJbDelay = null;
-    lastJbCount = null;
-  }
-
-  function fmtMs(value){
-    return Number.isFinite(value) ? `${Math.round(value)} ms` : "—";
-  }
-
-  async function sampleIntercomStats(c){
-    const pc = c && c.peerConnection;
-    if(!pc || typeof pc.getStats !== "function"){
-      if(intercomTimingDiag) intercomTimingDiag.textContent =
-        "Intercom timing — browser stats unavailable";
-      return;
-    }
-    try{
-      const report = await pc.getStats();
-      let inbound = null;
-      let pair = null;
-      report.forEach(stat => {
-        if(stat.type === "inbound-rtp" && stat.kind === "audio" && !stat.isRemote) inbound = stat;
-        if(stat.type === "candidate-pair" && stat.state === "succeeded" && stat.nominated) pair = stat;
-      });
-      if(!inbound){
-        if(intercomTimingDiag) intercomTimingDiag.textContent =
-          "Intercom timing — waiting for RTP stats";
-        return;
-      }
-
-      const jitterMs = Number.isFinite(inbound.jitter) ? inbound.jitter * 1000 : null;
-      let cumulativeJbMs = null;
-      if(Number.isFinite(inbound.jitterBufferDelay) &&
-         Number.isFinite(inbound.jitterBufferEmittedCount) &&
-         inbound.jitterBufferEmittedCount > 0){
-        cumulativeJbMs = (inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000;
-      }
-
-      let recentJbMs = null;
-      if(Number.isFinite(inbound.jitterBufferDelay) &&
-         Number.isFinite(inbound.jitterBufferEmittedCount) &&
-         lastJbDelay != null && lastJbCount != null){
-        const dDelay = inbound.jitterBufferDelay - lastJbDelay;
-        const dCount = inbound.jitterBufferEmittedCount - lastJbCount;
-        if(dCount > 0 && dDelay >= 0) recentJbMs = (dDelay / dCount) * 1000;
-      }
-      if(Number.isFinite(inbound.jitterBufferDelay)) lastJbDelay = inbound.jitterBufferDelay;
-      if(Number.isFinite(inbound.jitterBufferEmittedCount)) lastJbCount = inbound.jitterBufferEmittedCount;
-
-      intercomStatsSamples += 1;
-      if(Number.isFinite(recentJbMs)) intercomRecentJbSumMs += recentJbMs;
-      if(Number.isFinite(jitterMs)) intercomRecentJitterSumMs += jitterMs;
-
-      const avgRecentJbMs = intercomStatsSamples > 0 ? intercomRecentJbSumMs / intercomStatsSamples : null;
-      const avgJitterMs = intercomStatsSamples > 0 ? intercomRecentJitterSumMs / intercomStatsSamples : null;
-      const packetsReceived = Number.isFinite(inbound.packetsReceived) ? inbound.packetsReceived : 0;
-      const packetsLost = Number.isFinite(inbound.packetsLost) ? inbound.packetsLost : 0;
-      const packetsDiscarded = Number.isFinite(inbound.packetsDiscarded) ? inbound.packetsDiscarded : null;
-      const concealed = Number.isFinite(inbound.concealedSamples) ? inbound.concealedSamples : null;
-      const totalSamples = Number.isFinite(inbound.totalSamplesReceived) ? inbound.totalSamplesReceived : null;
-      const concealPct = concealed != null && totalSamples > 0 ? (concealed / totalSamples) * 100 : null;
-      const rttMs = pair && Number.isFinite(pair.currentRoundTripTime) ? pair.currentRoundTripTime * 1000 : null;
-
-      const line1 =
-        `Intercom timing — JB now ${fmtMs(recentJbMs)} · JB avg ${fmtMs(avgRecentJbMs)} · ` +
-        `JB total ${fmtMs(cumulativeJbMs)} · jitter ${fmtMs(jitterMs)} (avg ${fmtMs(avgJitterMs)})`;
-      const line2 = [
-        `Packets ${packetsReceived}`,
-        `loss ${packetsLost}`,
-        packetsDiscarded != null ? `discard ${packetsDiscarded}` : null,
-        concealPct != null ? `conceal ${concealPct.toFixed(2)}%` : null,
-        rttMs != null ? `RTT ${fmtMs(rttMs)}` : null,
-        `PC ${pc.connectionState || "—"}`,
-        `ICE ${pc.iceConnectionState || "—"}`
-      ].filter(Boolean).join(" · ");
-
-      if(intercomTimingDiag) intercomTimingDiag.innerHTML = `${line1}<br>${line2}`;
-    }catch(_e){
-      if(intercomTimingDiag) intercomTimingDiag.textContent =
-        "Intercom timing — stats read failed";
-    }
-  }
-
-  function startIntercomStats(c){
-    stopIntercomStats();
-    intercomStatsSamples = 0;
-    intercomRecentJbSumMs = 0;
-    intercomRecentJitterSumMs = 0;
-    if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — collecting…";
-    sampleIntercomStats(c);
-    intercomStatsTimer = setInterval(() => sampleIntercomStats(c), 2000);
-  }
-
-  function attachCallHandlers(c){
-    if(call && call !== c){
-      try{ call.close(); }catch(_e){}
-    }
-    call = c;
-    set("Media call received…");
-    c.answer();
-    startIntercomStats(c);
-
-    c.on("stream", async stream => {
-      // Leave the silent autoplay-prime state and restore actual intercom level.
-      audioEl.pause();
-      audioEl.loop = false;
-      audioEl.volume = 1;
-      audioEl.src = "";
-      audioEl.srcObject = stream;
-
-      const track = stream.getAudioTracks && stream.getAudioTracks()[0];
-      if(track){
-        track.addEventListener("ended", () => setIntercomLive(false), {once:true});
-        track.addEventListener("mute", () => setIntercomLive(false));
-        track.addEventListener("unmute", () => setIntercomLive(true));
-      }
-
-      startLiveWatchdog(c);
-
-      try{
-        await audioEl.play();
-        setIntercomLive(managerBroadcastStateKnown ? managerBroadcastActive : false);
-        set(managerBroadcastActive
-          ? "LIVE — receiving audio"
-          : "Intercom media ready · waiting for broadcast");
-      }catch(_e){
-        setIntercomLive(false);
-        set("Intercom audio waiting for user gesture");
-      }
-    });
-
-    const finish = () => {
-      if(call === c) call = null;
-      managerBroadcastActive = false;
-      managerBroadcastStateKnown = false;
-      setSoundtrackDucked(false);
-      stopIntercomStats();
-      stopLiveWatchdog();
-      setIntercomLive(false);
-      if(intercomTimingDiag) intercomTimingDiag.textContent = "Intercom timing — broadcast ended";
-      try{
-        audioEl.pause();
-        audioEl.srcObject = null;
-      }catch(_e){}
-      pollSession();
-    };
-    c.on("close", finish);
-    c.on("error", finish);
-  }
-
-  function startPeer(){
-    if(peer) return;
-    if(!window.Peer){ set("PeerJS unavailable"); return; }
-    set("Opening receiver…");
-    peer = new Peer();
-
-    peer.on("open", async id => {
-      peerId = id;
-      set("Receiver open · registering session…");
-      await registerReceiver();
-    });
-
-    peer.on("call", attachCallHandlers);
-
-    peer.on("connection", controlConn => {
-      controlConn.on("data", data => {
-        if(!data || data.type !== "broadcast-state") return;
-        managerBroadcastStateKnown = true;
-        managerBroadcastActive = !!data.active;
-        setIntercomLive(managerBroadcastActive);
-        setSoundtrackDucked(managerBroadcastActive);
-
-        if(managerBroadcastActive){
-          set("LIVE — receiving audio");
-        }else{
-          set("Receiver registered · manager online");
-        }
-      });
-
-      controlConn.on("close", () => {
-        // Media may remain alive through signaling churn; avoid showing stale LIVE.
-        managerBroadcastActive = false;
-        setIntercomLive(false);
-        setSoundtrackDucked(false);
-      });
-
-      controlConn.on("error", () => {
-        managerBroadcastActive = false;
-        setIntercomLive(false);
-        setSoundtrackDucked(false);
-      });
-    });
-
-    peer.on("disconnected", () => {
-      set("Receiver signaling reconnecting…");
-      try{ peer.reconnect(); }catch(_e){}
-    });
-
-    peer.on("error", e => {
-      const kind = e && (e.type || e.message) ? (e.type || e.message) : "unknown";
-      if(kind === "network"){
-        set("Receiver network warning · retrying…");
-      }else{
-        set("Receiver peer warning: " + kind);
-      }
-    });
-  }
-
-  btn.addEventListener("click", () => {
-    if(started) return;
-    started = true;
-    startPeer();
-  });
-
-  const programAudio = document.getElementById("audio");
-  if(programAudio){
-    programAudio.addEventListener("ended", () => {
-      // Keep the intercom session alive through the post-show/credits state.
-      // The next performance's Begin path remains the hard session boundary:
-      // a different Start Time clears the old stored session before arming the new one.
-      setSoundtrackDucked(false);
-      const baseDiag = document.getElementById("intercomDiagnostics");
-      if(baseDiag) baseDiag.textContent = "Intercom — post-show available";
-    });
-  }
-  const SILENT_WAV = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
-
-  if(begin && btn){
-    begin.addEventListener("click", () => {
-      try{
-        const snapshot = storedSessionSnapshot();
-        const visibleValue = startField && startField.value;
-        const exactRunningRejoin =
-          sessionStorage.getItem(BLUE_ARMED_KEY) === "1" &&
-          storedSessionIsActuallyUnderway(snapshot) &&
-          snapshot.startValue === visibleValue;
-
-        if(!exactRunningRejoin){
-          sessionStorage.removeItem(BLUE_ARMED_KEY);
-          sessionStorage.removeItem(SESSION_KEY);
-          sessionStorage.removeItem(SESSION_START_KEY);
-        }
-      }catch(_e){}
-
-      const armed = freezeSession(startField && startField.value);
-      const baseDiag = document.getElementById("intercomDiagnostics");
-      if(baseDiag) baseDiag.textContent = armed
-        ? "Intercom — session armed"
-        : "Intercom — session not armed";
-      if(armed){
-        try{ sessionStorage.setItem(BLUE_ARMED_KEY, "1"); }catch(_e){}
-      }
-      if(!armed){
-        set("Intercom session needs a Start Time");
-        return;
-      }
-
-      try{
-        audioEl.srcObject = null;
-        audioEl.src = SILENT_WAV;
-        audioEl.loop = true;
-        audioEl.volume = 0.0001;
-        const p = audioEl.play();
-        if(p && typeof p.catch === "function") p.catch(()=>{});
-      }catch(_e){}
-
-      btn.click();
-    }, {once:true, capture:true});
-  }
-
-  window.addEventListener("pagehide", () => {
-    if(peerId && sessionId){
-      fetch(`${REGISTRY_BASE}/api/session/${encodeURIComponent(sessionId)}/receiver/${encodeURIComponent(peerId)}`, {
-        method:"DELETE",
-        keepalive:true
-      }).catch(()=>{});
-    }
-  });
+  document.getElementById('playButton')?.addEventListener('click', () => { armed = true; void register(); });
+  document.getElementById('startNowButton')?.addEventListener('click', () => { armed = true; void register(); });
+  start?.addEventListener('change', () => { if (sessionId() !== successfulId) void register(); });
+  setInterval(register, 4000);
 })();
 </script>
-
+<!-- V9 Overlay Engine: passive until an assigned manifest event has real audio. -->
+<script>
+(() => {
+  'use strict';
+  // Change this URL to the hosted JSON after uploading it; missing manifest = silence.
+  const MANIFEST_URL = 'https://eggtooth.xyz/common-v9-manifest.json';
+  const overlay = new Audio();
+  overlay.preload = 'auto';
+  overlay.playsInline = true;
+  overlay.volume = 1;
+  const diag = document.getElementById('v9OverlayDiagnostics');
+  const say = str => { if(diag) diag.textContent = 'Overlay: ' + str; window.commonV9Diag?.set('overlay',str); if(/playing |completed |missed |failed /.test(str))window.commonV9Diag?.event('Overlay '+str); };
+  let number = null, session = null, events = [], current = null;
+  let ducking = false, showStarted = false;
+  let checkBusy = false, generation = 0;
+  const MAX_LATE_SEC = 2.0;
+  const toClock = sec => String(Math.floor(sec / 60)).padStart(2,'0') + ':' + String(Math.floor(sec % 60)).padStart(2,'0');
+  function duck(active){
+    if(ducking === active) return;
+    ducking = active;
+    window.commonV9RequestOverlayDuck?.(active);
+  }
+  function stop(){
+    current = null;
+    overlay.pause(); overlay.removeAttribute('src'); overlay.load();
+    duck(false);
+  }
+  async function loadManifest(id, participantNumber){
+    const token = ++generation;
+    stop(); events = [];
+    say('loading configuration…');
+    try {
+      const response = await fetch(MANIFEST_URL, {cache:'no-store'});
+      if(!response.ok) throw Error('HTTP ' + response.status);
+      const manifest = await response.json();
+      if(manifest.version !== 9 || !Array.isArray(manifest.events)) throw Error('invalid V9 manifest');
+      const filtered=[];
+      for(const event of manifest.events){
+        if(!Array.isArray(event.participants) || !event.participants.includes(participantNumber)) continue;
+        if(!Number.isFinite(event.atSec) || event.atSec < 0 || typeof event.url !== 'string' || !/^https:\/\//.test(event.url)) continue;
+        filtered.push({id: String(event.id || event.url), atSec:event.atSec, url:event.url, done:false});
+      }
+      if(token !== generation || id !== session) return;
+      events = filtered.sort((a,b)=>a.atSec-b.atSec);
+      say(events.length ? events.length + ' cue(s) ready' : 'no assigned cues');
+    } catch(err){ if(token === generation) say('no overlays (' + err.message + ')'); }
+  }
+  window.addEventListener('common-v9-participant-registered', evt => {
+    const {participantNumber, sessionId} = evt.detail || {};
+    if(!Number.isSafeInteger(participantNumber) || !sessionId) return;
+    if(number === participantNumber && session === sessionId) return;
+    number=participantNumber; session=sessionId;
+    void loadManifest(session,number);
+  });
+  async function tick(){
+    if(checkBusy || !events.length) return;
+    const showSec = window.commonV9ReadShowTimeSec?.();
+    if(!Number.isFinite(showSec)) return;
+    if(document.getElementById('audio')?.paused) return; // never starts overlays before show audio
+    if(current) return; // at most one overlay at once
+    const due = events.find(e=>!e.done && showSec >= e.atSec);
+    if(!due) return;
+    due.done=true;
+    if(showSec - due.atSec > MAX_LATE_SEC){ say('missed ' + due.id + ' (late)'); return; }
+    checkBusy=true;
+    const token=generation;
+    try {
+      overlay.src = due.url;
+      overlay.load();
+      // A short cue with a startup delay should not fire far off the canonical clock.
+      await new Promise((resolve,reject)=>{
+        if(overlay.readyState>=2) return resolve();
+        const timer=setTimeout(()=>{cleanup();reject(Error('load timeout'));}, 4500);
+        const ready=()=>{cleanup();resolve();}; const fail=()=>{cleanup();reject(Error('audio load failed'));};
+        function cleanup(){clearTimeout(timer);overlay.removeEventListener('loadeddata',ready);overlay.removeEventListener('error',fail);}
+        overlay.addEventListener('loadeddata',ready); overlay.addEventListener('error',fail);
+      });
+      const now=window.commonV9ReadShowTimeSec?.();
+      if(token!==generation || !Number.isFinite(now) || now-due.atSec>MAX_LATE_SEC) throw Error('cue missed window');
+      const target=Math.max(0,now-due.atSec);
+      if(Number.isFinite(overlay.duration) && target >= overlay.duration) throw Error('cue already elapsed');
+      overlay.currentTime=target;
+      // Arm the duck only after playback actually starts.
+      await overlay.play();
+      if(token!==generation) {overlay.pause(); return;}
+      current=due;
+      duck(true);
+      say('playing ' + due.id + ' at ' + toClock(due.atSec));
+    } catch(err) { say(due.id + ': ' + err.message); duck(false); }
+    finally {checkBusy=false;}
+  }
+  overlay.addEventListener('ended',()=>{const id=current?.id; stop();say(id ? 'completed '+id : 'idle');});
+  overlay.addEventListener('error',()=>{const id=current?.id;stop();say(id ? 'failed '+id : 'audio error');});
+  document.getElementById('startTime')?.addEventListener('change',()=>{generation++;stop();events=[];number=null;session=null;say('awaiting session registration');});
+  setInterval(()=>{void tick();},100);
+  say('waiting for participant number');
+})();
+</script>
+<script>
+(()=>{
+ const backbone=document.getElementById('audio');
+ let overlay=false,broadcast=false,fade=null,baseline=1,ducked=false;
+ function apply(){
+  const target=(overlay||broadcast)?0.25:baseline;
+  if(!ducked&&(overlay||broadcast)){baseline=backbone.volume;ducked=true;}
+  if(!overlay&&!broadcast)ducked=false;
+  const start=backbone.volume, end=(overlay||broadcast)?Math.min(1,baseline*0.25):baseline;
+  const begin=performance.now(), duration=(overlay||broadcast)?200:500;if(fade)cancelAnimationFrame(fade);
+  function step(now){const t=Math.min(1,(now-begin)/duration);backbone.volume=start+(end-start)*t;if(t<1)fade=requestAnimationFrame(step);else fade=null;}
+  fade=requestAnimationFrame(step);
+ }
+ window.commonV9RequestOverlayDuck=flag=>{overlay=!!flag;apply();window.commonV9Diag?.set('ducking',(overlay||broadcast)?'25%':'100%');window.commonV9Diag?.set('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');};
+ window.commonV9RequestBroadcastDuck=flag=>{broadcast=!!flag;apply();window.commonV9Diag?.set('ducking',(overlay||broadcast)?'25%':'100%');window.commonV9Diag?.set('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');};
+})();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+/* V9 audience listener: mute/unmute publication events, never audio-element playing. */
+(() => {
+ 'use strict';
+ const TOKEN_SERVICE='https://REPLACE-WITH-YOUR-V9-TOKEN-WORKER.workers.dev';
+ const state=document.getElementById('intercomDiagnostics');
+ const live=document.getElementById('intercomLive');
+ const lk=window.LivekitClient;
+ const publications=new Map();
+ let room=null,roomSession=null,busy=false;
+ const say=msg=>{if(state)state.textContent='Live broadcast — '+msg;window.commonV9Diag?.set('connection',msg);if(/error|failed|cannot|disconnected/i.test(msg))window.commonV9Diag?.set('error',msg);};
+ const duck=()=>{
+   const active=publications.size>0;
+   window.commonV9Diag?.set('audience',active?'Receiving':'Idle');
+   window.commonV9RequestBroadcastDuck?.(active);
+   live?.classList.toggle('active',active);
+ };
+ function clear(){publications.clear();duck();}
+ function sessionId(){const s=String(document.getElementById('startTime')?.value||'').replace(/[^0-9A-Za-z]/g,'');return s?'common-v6-'+s:null;}
+ const keyFor=(person,pub)=>person.identity+':'+pub.trackSid;
+ function publicationChanged(person,pub,unmuted){
+   if(!person||!pub||pub.kind!=='audio')return;
+   const key=keyFor(person,pub);
+   if(unmuted)publications.set(key,true);else publications.delete(key);
+   window.commonV9Diag?.set('broadcaster',unmuted?person.identity:'—');
+   if(unmuted)window.commonV9Diag?.begin('Audience');else window.commonV9Diag?.end('Audience');
+   duck();
+ }
+ async function connect(id){
+   if(!lk||TOKEN_SERVICE.includes('REPLACE-WITH')){say('service not configured');return;}
+   if(room){await room.disconnect();room=null;}clear();
+   const response=await fetch(TOKEN_SERVICE+'/api/livekit/token',{
+     method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({sessionId:id,kind:'audience-listener'})
+   });
+   const info=await response.json();if(!response.ok)throw Error(info.error||'Cannot join audience audio');
+   const joined=new lk.Room({autoSubscribe:true,adaptiveStream:false});
+   joined.on(lk.RoomEvent.TrackSubscribed,(track,pub,person)=>{
+     if(track.kind!=='audio')return;
+     const element=track.attach();element.autoplay=true;element.playsInline=true;
+     document.body.appendChild(element);
+     publicationChanged(person,pub,!pub.isMuted);
+     element.play()?.catch(()=>say('tap Begin to allow audio'));
+   });
+   joined.on(lk.RoomEvent.TrackMuted,(pub,person)=>publicationChanged(person,pub,false));
+   joined.on(lk.RoomEvent.TrackUnmuted,(pub,person)=>publicationChanged(person,pub,true));
+   joined.on(lk.RoomEvent.TrackUnsubscribed,(track,pub,person)=>{
+     track.detach().forEach(element=>element.remove());
+     publicationChanged(person,pub,false);
+   });
+   joined.on(lk.RoomEvent.ParticipantDisconnected,person=>{
+     for(const key of publications.keys())if(key.startsWith(person.identity+':'))publications.delete(key);
+     duck();
+   });
+   joined.on(lk.RoomEvent.Disconnected,()=>{clear();say('disconnected — retrying');});
+   await joined.connect(info.url,info.token);
+   room=joined;roomSession=id;window.commonV9Diag?.set('room','Audience');window.commonV9Diag?.event('Audience room connected');say('connected · listen only');
+ }
+ async function poll(){
+   const id=sessionId();if(!id||busy)return;
+   if(roomSession===id&&room?.state==='connected')return;
+   busy=true;
+   try{await connect(id);}catch(error){clear();say(error?.message||String(error));}
+   finally{busy=false;}
+ }
+ document.getElementById('playButton')?.addEventListener('click',()=>void poll());
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)void poll();});
+ window.addEventListener('pagehide',()=>{clear();room?.disconnect();});
+ setInterval(()=>void poll(),5000);
+ say('waiting for session');
+})();
+</script>
+<script>
+/* V9 lightweight local diagnostics; observer only, never changes playback. */
+(()=>{
+ 'use strict';
+ const health=document.getElementById('v9AudioHealth');
+ const events=document.getElementById('v9AudioEvents');
+ const panel=document.getElementById('diagnosticsPanel');
+ const history=[];
+ const fields={connection:'Not connected',room:'—',audience:'Idle',managers:'Idle',broadcaster:'—',ducking:'100%',reason:'None',last:'—',error:'—',overlay:'—',quality:'Not measured'};
+ let lastStart=null;
+ const stamp=()=>new Date().toLocaleTimeString();
+ function draw(){
+  if(panel?.classList.contains('hidden'))return;
+  health.textContent='V9 audio · '+fields.connection+' | Room: '+fields.room+' | Audience: '+fields.audience+' | Managers: '+fields.managers+' | From: '+fields.broadcaster+' | Duck: '+fields.ducking+' ('+fields.reason+') | Last: '+fields.last+' | Quality: '+fields.quality+' | Error: '+fields.error+' | Overlay: '+fields.overlay;
+  events.textContent='Recent audio events (local):\n'+(history.length?history.map(e=>e.time+'  '+e.message).join('\n'):'None');
+ }
+ window.commonV9Diag={
+  set(key,value){if(Object.hasOwn(fields,key)){fields[key]=String(value);draw();}},
+  event(message){history.push({time:stamp(),message:String(message).slice(0,180)});if(history.length>20)history.shift();draw();},
+  begin(kind){lastStart={kind,time:performance.now()};this.event(kind+' broadcast started');},
+  end(kind){if(lastStart?.kind===kind){fields.last=kind+' '+((performance.now()-lastStart.time)/1000).toFixed(1)+'s';lastStart=null;}this.event(kind+' broadcast ended');draw();}
+ };
+ panel?.addEventListener('transitionend',draw);
+ document.getElementById('diagnosticsToggle')?.addEventListener('click',()=>queueMicrotask(draw));
+ draw();
+})();
+</script>
 </body>
 </html>
