@@ -3497,7 +3497,7 @@
 /* V9 audience listener: mute/unmute publication events, never audio-element playing. */
 (() => {
  'use strict';
- const TOKEN_SERVICE='https://REPLACE-WITH-YOUR-V9-TOKEN-WORKER.workers.dev';
+ const TOKEN_SERVICE='https://common-v9-livekit-token.jbechs.workers.dev';
  const state=document.getElementById('intercomDiagnostics');
  const live=document.getElementById('intercomLive');
  const lk=window.LivekitClient;
@@ -3511,7 +3511,7 @@
    live?.classList.toggle('active',active);
  };
  function clear(){publications.clear();duck();}
- function sessionId(){const s=String(document.getElementById('startTime')?.value||'').replace(/[^0-9A-Za-z]/g,'');return s?'common-v6-'+s:null;}
+ function sessionId(){const value=document.getElementById('startTime')?.value||'';return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)?'common-v6-'+value.replace(/[-:]/g,''):null;}
  const keyFor=(person,pub)=>person.identity+':'+pub.trackSid;
  function publicationChanged(person,pub,unmuted){
    if(!person||!pub||pub.kind!=='audio')return;
