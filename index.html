@@ -3350,6 +3350,7 @@
   let successfulId = null;
   let registering = false;
   let armed = false;
+  let hasStarted = false;
   function set(text) { if (diag) diag.textContent = 'Participant Number: ' + text; }
   function sessionId() {
     const value = start?.value || '';
@@ -3357,7 +3358,7 @@
   }
   async function register() {
     const id = sessionId();
-    if (!id || !armed || registering || id === successfulId) return;
+    if (!id || !armed || registering) return;
     if (id !== lastId) { lastId = id; set('registering…'); }
     registering = true;
     try {
@@ -3365,7 +3366,7 @@
       let key = localStorage.getItem(keyName);
       if (!key) { key = crypto.randomUUID(); localStorage.setItem(keyName, key); }
       const response = await fetch(V9_REGISTRY_BASE + '/api/session/' + encodeURIComponent(id) + '/participant', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({participantKey:key}), cache: 'no-store'
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({participantKey:key, started:hasStarted}), cache: 'no-store'
       });
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data = await response.json();
@@ -3374,10 +3375,10 @@
     } catch (error) { set('registration pending (' + error.message + ')'); }
     finally { registering = false; }
   }
-  document.getElementById('playButton')?.addEventListener('click', () => { armed = true; void register(); });
-  document.getElementById('startNowButton')?.addEventListener('click', () => { armed = true; void register(); });
+  document.getElementById('playButton')?.addEventListener('click', () => { armed = true; hasStarted = true; void register(); });
+  document.getElementById('startNowButton')?.addEventListener('click', () => { armed = true; hasStarted = true; void register(); });
   start?.addEventListener('change', () => { if (sessionId() !== successfulId) void register(); });
-  setInterval(register, 4000);
+  setInterval(register, 10000); // Live presence, no audio or clock access.
 })();
 </script>
 <!-- V9 Overlay Engine: passive until an assigned manifest event has real audio. -->
