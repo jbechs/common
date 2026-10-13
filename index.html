@@ -3469,7 +3469,7 @@
       const target=Math.max(0,now-due.atSec);
       if(Number.isFinite(overlay.duration) && target >= overlay.duration) throw Error('cue already elapsed');
       overlay.currentTime=target;
-      // Arm the duck only after playback actually starts.
+      // Arm the 10% backbone duck only after overlay playback actually starts.
       await overlay.play();
       if(token!==generation) {overlay.pause(); return;}
       current=due;
@@ -3493,7 +3493,7 @@
   if(!backbone)return;
   const needed=overlay||broadcast;
   if(needed&&!ducked){baseline=backbone.volume;ducked=true;}
-  const target=needed?baseline*(broadcast?0.10:0.25):baseline;
+  const target=needed?baseline*0.10:baseline;
   const start=backbone.volume, begin=performance.now();
   const duration=needed?200:500;
   if(fade!==null)cancelAnimationFrame(fade);
@@ -3505,7 +3505,7 @@
   }
   fade=requestAnimationFrame(step);
   window.commonV9SetOverlayIntercomDuck?.(broadcast);
-  window.commonV9Diag?.set('ducking',broadcast?'10%':overlay?'25%':'100%');
+  window.commonV9Diag?.set('ducking',broadcast?'10%':overlay?'10%':'100%');
   window.commonV9Diag?.set('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');
  }
  window.commonV9RequestOverlayDuck=flag=>{if(overlay===!!flag)return;overlay=!!flag;apply();};
