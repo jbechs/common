@@ -3393,6 +3393,38 @@
   overlay.preload = 'auto';
   overlay.playsInline = true;
   overlay.volume = 1;
+  // Preload the test cue on this SAME audio element; do not replace it at cue time.
+  const TEST_AUDIO_URL = 'https://eggtooth.xyz/overlay1.mp3';
+  overlay.src = TEST_AUDIO_URL;
+  overlay.load();
+  let unlockStatus = 'not attempted';
+  let unlockBusy = false;
+  // Runs synchronously within the Begin/Start Now tap, before async preparation.
+  function unlockOverlayOnGesture(){
+    if (unlockBusy || unlockStatus === 'ready') return;
+    unlockBusy = true;
+    // Silence the brief priming playback without setting muted (which would only
+    // establish permission for muted autoplay). Do not duck the backbone here.
+    overlay.volume = 0;
+    let attempt;
+    try { attempt = overlay.play(); }
+    catch(err) { unlockStatus = 'failed: ' + (err?.name || String(err)); unlockBusy = false; overlay.volume = 1; window.commonV9Diag?.event('Overlay unlock '+unlockStatus); return; }
+    Promise.resolve(attempt).then(()=>{
+      // Keep this very short. The same <audio> and source are retained for the cue.
+      if(!current) { overlay.pause(); try { overlay.currentTime = 0; } catch(_) {} }
+      unlockStatus = 'ready';
+      window.commonV9Diag?.event('Overlay unlock ready');
+    }).catch(err=>{
+      unlockStatus = 'failed: ' + (err?.name || String(err));
+      window.commonV9Diag?.event('Overlay unlock '+unlockStatus);
+    }).finally(()=>{
+      unlockBusy = false;
+      overlay.volume = 1;
+      if(!current) say('unlock '+unlockStatus+' · '+(events.length ? events.length+' cue(s) ready' : 'awaiting participant assignment'));
+    });
+  }
+  document.getElementById('playButton')?.addEventListener('click', unlockOverlayOnGesture, {capture:true});
+  document.getElementById('startNowButton')?.addEventListener('click', unlockOverlayOnGesture, {capture:true});
   // Broadcasts take priority over overlays; playback timing is never modified.
   window.commonV9SetOverlayIntercomDuck = active => {
     overlay.volume = active ? 0.10 : 1;
@@ -3411,7 +3443,8 @@
   }
   function stop(){
     current = null;
-    overlay.pause(); overlay.removeAttribute('src'); overlay.load();
+    overlay.pause();
+    try { overlay.currentTime=0; } catch(_) {} // retain primed source and playback authorization
     duck(false);
   }
   async function loadManifest(id, participantNumber){
@@ -3453,8 +3486,11 @@
     checkBusy=true;
     const token=generation;
     try {
-      overlay.src = due.url;
-      overlay.load();
+      if (overlay.src !== due.url) {
+        // Should never happen for this single-cue test; preserve ability to diagnose.
+        overlay.src = due.url;
+        overlay.load();
+      }
       // A short cue with a startup delay should not fire far off the canonical clock.
       await new Promise((resolve,reject)=>{
         if(overlay.readyState>=2) return resolve();
@@ -3474,7 +3510,7 @@
       current=due;
       duck(true);
       say('playing ' + due.id + ' at ' + toClock(due.atSec));
-    } catch(err) { say(due.id + ': ' + err.message); duck(false); }
+    } catch(err) { say('failed '+due.id + ': ' + (err?.name || 'Error') + ' ' + err.message + ' (unlock '+unlockStatus+')'); duck(false); }
     finally {checkBusy=false;}
   }
   overlay.addEventListener('ended',()=>{const id=current?.id; stop();say(id ? 'completed '+id : 'idle');});
