@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>common — V9 Web Audio duck test</title>
+  <title>common</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -610,7 +610,7 @@
     </div>
 
 
-    <audio id="audio" crossorigin="anonymous" preload="auto" playsinline class="hidden"></audio>
+    <audio id="audio" preload="auto" playsinline class="hidden"></audio>
     <audio id="intercomAudio" autoplay playsinline class="hidden"></audio>
     <audio id="preshowAudio" preload="auto" playsinline loop class="hidden"></audio>
   </main>
@@ -3523,67 +3523,28 @@
 <script>
 (()=>{
  const backbone=document.getElementById('audio');
- let overlay=false, broadcast=false;
- let ctx=null, source=null, gain=null, initialized=false, initError=null;
- const diag=(key,value)=>window.commonV9Diag?.set(key,value);
- const report=message=>window.commonV9Diag?.event('Web Audio duck: '+message);
- function describe(){
-   diag('ducking',(overlay||broadcast)?'10% requested':'100% requested');
-   diag('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');
-   diag('webAudio',ctx ? ('context '+ctx.state+' · gain '+gain.gain.value.toFixed(3)) :
-     (initError ? 'ERROR '+initError : 'not initialized'));
- }
- function ensureGraph(){
-   if(initialized)return;
-   const AudioContextClass=window.AudioContext||window.webkitAudioContext;
-   if(!AudioContextClass)throw Error('Web Audio unavailable');
-   // createMediaElementSource may be called ONCE per media element.
-   // Retain the original audio element as the sole clock, seek and playback engine.
-   ctx=new AudioContextClass();
-   source=ctx.createMediaElementSource(backbone);
-   gain=ctx.createGain();
-   gain.gain.value=1;
-   source.connect(gain);
-   gain.connect(ctx.destination);
-   initialized=true;
-   report('graph created');
- }
- function activate(){
-   try{
-     ensureGraph();
-     // Invoke resume synchronously inside the trusted Begin click handler.
-     const promise=ctx.resume();
-     Promise.resolve(promise).then(()=>{report('context '+ctx.state);describe();})
-       .catch(err=>{initError='resume '+(err?.message||String(err));report(initError);describe();});
-   }catch(err){initError=err?.message||String(err);report(initError);describe();}
- }
- for(const id of ['playButton','startNowButton']){
-   document.getElementById(id)?.addEventListener('click',activate,{capture:true});
- }
+ let overlay=false,broadcast=false,fade=null,baseline=1,ducked=false;
  function apply(){
-   if(!gain||!ctx){report('gain not ready for duck request');describe();return;}
-   const needed=overlay||broadcast;
-   const startAt=ctx.currentTime;
-   const duration=needed?.2:.5;
-   const param=gain.gain;
-   // Preserve the instantaneous value when a new request interrupts a fade.
-   if(typeof param.cancelAndHoldAtTime==='function')param.cancelAndHoldAtTime(startAt);
-   else {const current=param.value;param.cancelScheduledValues(startAt);param.setValueAtTime(current,startAt);}
-   param.linearRampToValueAtTime(needed?.1:1,startAt+duration);
-   window.commonV9SetOverlayIntercomDuck?.(broadcast);
-   report((needed?'duck':'restore')+' requested; target '+(needed?'0.10':'1.00')+' in '+Math.round(duration*1000)+' ms');
-   describe();
+  if(!backbone)return;
+  const needed=overlay||broadcast;
+  if(needed&&!ducked){baseline=backbone.volume;ducked=true;}
+  const target=needed?baseline*0.10:baseline;
+  const start=backbone.volume, begin=performance.now();
+  const duration=needed?200:500;
+  if(fade!==null)cancelAnimationFrame(fade);
+  function step(now){
+   const t=Math.min(1,(now-begin)/duration);
+   backbone.volume=start+(target-start)*t;
+   if(t<1)fade=requestAnimationFrame(step);
+   else {fade=null;if(!needed)ducked=false;}
+  }
+  fade=requestAnimationFrame(step);
+  window.commonV9SetOverlayIntercomDuck?.(broadcast);
+  window.commonV9Diag?.set('ducking',broadcast?'10%':overlay?'10%':'100%');
+  window.commonV9Diag?.set('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');
  }
  window.commonV9RequestOverlayDuck=flag=>{if(overlay===!!flag)return;overlay=!!flag;apply();};
  window.commonV9RequestBroadcastDuck=flag=>{if(broadcast===!!flag)return;broadcast=!!flag;apply();};
- document.addEventListener('visibilitychange',()=>{
-   if(!document.hidden && ctx && ctx.state!=='running'){
-     ctx.resume().then(()=>{report('context resumed on visibility');describe();})
-       .catch(err=>{report('resume failed '+err.message);describe();});
-   }
- });
- setInterval(()=>{if(ctx)describe();},1000);
- describe();
 })();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
@@ -3669,12 +3630,12 @@
  const events=document.getElementById('v9AudioEvents');
  const panel=document.getElementById('diagnosticsPanel');
  const history=[];
- const fields={connection:'Not connected',room:'—',audience:'Idle',managers:'Idle',broadcaster:'—',ducking:'100%',reason:'None',last:'—',error:'—',overlay:'—',quality:'Not measured',webAudio:'Not reported'};
+ const fields={connection:'Not connected',room:'—',audience:'Idle',managers:'Idle',broadcaster:'—',ducking:'100%',reason:'None',last:'—',error:'—',overlay:'—',quality:'Not measured'};
  let lastStart=null;
  const stamp=()=>new Date().toLocaleTimeString();
  function draw(){
   if(panel?.classList.contains('hidden'))return;
-  health.textContent='V9 audio · '+fields.connection+' | Room: '+fields.room+' | Audience: '+fields.audience+' | Managers: '+fields.managers+' | From: '+fields.broadcaster+' | Duck: '+fields.ducking+' ('+fields.reason+') | Last: '+fields.last+' | Quality: '+fields.quality+' | Error: '+fields.error+' | Overlay: '+fields.overlay+' | Web Audio: '+fields.webAudio;
+  health.textContent='V9 audio · '+fields.connection+' | Room: '+fields.room+' | Audience: '+fields.audience+' | Managers: '+fields.managers+' | From: '+fields.broadcaster+' | Duck: '+fields.ducking+' ('+fields.reason+') | Last: '+fields.last+' | Quality: '+fields.quality+' | Error: '+fields.error+' | Overlay: '+fields.overlay;
   events.textContent='Recent audio events (local):\n'+(history.length?history.map(e=>e.time+'  '+e.message).join('\n'):'None');
  }
  window.commonV9Diag={
