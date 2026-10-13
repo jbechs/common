@@ -3387,8 +3387,8 @@
 <script>
 (() => {
   'use strict';
-  // Change this URL to the hosted JSON after uploading it; missing manifest = silence.
-  const MANIFEST_URL = 'https://eggtooth.xyz/common-v9-manifest.json';
+  // TEST BUILD ONLY: self-contained cue manifest. Restore hosted manifest in baseline.
+  const TEST_MANIFEST = Object.freeze({version:9, events:[{id:'overlay1-p2-30s', participants:[2], atSec:30, url:'https://eggtooth.xyz/overlay1.mp3'}]});
   const overlay = new Audio();
   overlay.preload = 'auto';
   overlay.playsInline = true;
@@ -3419,9 +3419,8 @@
     stop(); events = [];
     say('loading configuration…');
     try {
-      const response = await fetch(MANIFEST_URL, {cache:'no-store'});
-      if(!response.ok) throw Error('HTTP ' + response.status);
-      const manifest = await response.json();
+      // Deterministic, local test configuration; no additional server file required.
+      const manifest = TEST_MANIFEST;
       if(manifest.version !== 9 || !Array.isArray(manifest.events)) throw Error('invalid V9 manifest');
       const filtered=[];
       for(const event of manifest.events){
