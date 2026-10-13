@@ -3528,7 +3528,7 @@
  const diag=(key,value)=>window.commonV9Diag?.set(key,value);
  const report=message=>window.commonV9Diag?.event('Web Audio duck: '+message);
  function describe(){
-   diag('ducking',(overlay||broadcast)?'10% requested':'100% requested');
+   diag('ducking',overlay?'5% requested':broadcast?'10% requested':'100% requested');
    diag('reason',broadcast?'Audience Broadcast':overlay?'Individual Overlay':'None');
    diag('webAudio',ctx ? ('context '+ctx.state+' · gain '+gain.gain.value.toFixed(3)) :
      (initError ? 'ERROR '+initError : 'not initialized'));
@@ -3563,15 +3563,18 @@
  function apply(){
    if(!gain||!ctx){report('gain not ready for duck request');describe();return;}
    const needed=overlay||broadcast;
+   // Individual overlays duck to 5%; the audience intercom alone retains 10%.
+   // With both active, keep the quieter (5%) backbone until the overlay ends.
+   const target=overlay?0.05:(broadcast?0.10:1);
    const startAt=ctx.currentTime;
    const duration=needed?.2:.5;
    const param=gain.gain;
    // Preserve the instantaneous value when a new request interrupts a fade.
    if(typeof param.cancelAndHoldAtTime==='function')param.cancelAndHoldAtTime(startAt);
    else {const current=param.value;param.cancelScheduledValues(startAt);param.setValueAtTime(current,startAt);}
-   param.linearRampToValueAtTime(needed?.1:1,startAt+duration);
+   param.linearRampToValueAtTime(target,startAt+duration);
    window.commonV9SetOverlayIntercomDuck?.(broadcast);
-   report((needed?'duck':'restore')+' requested; target '+(needed?'0.10':'1.00')+' in '+Math.round(duration*1000)+' ms');
+   report((needed?'duck':'restore')+' requested; target '+target.toFixed(2)+' in '+Math.round(duration*1000)+' ms');
    describe();
  }
  window.commonV9RequestOverlayDuck=flag=>{if(overlay===!!flag)return;overlay=!!flag;apply();};
