@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>common — V9 background playback A/B test</title>
+  <title>common — V9 startup repair test</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -762,6 +762,10 @@
     let preshowPlaying = false;
     let waitingForManualStart = false;
     let startAttempted = false;
+    // Preparation uses muted probe playback, not actual performance playback.
+    let preparationInFlight = false;
+    let programStartInFlight = false;
+    let programPlaybackStarted = false;
     let lastDriftSec = 0;
     let lastHardSeekAtMs = 0;
     let initialDriftSec = null;
@@ -1130,10 +1134,13 @@
       startNowMode = mode;
       startNowButton.textContent = mode === "resume" ? "Resume" : "Begin";
       startNowButton.classList.remove("hidden");
+      // Only one Begin is visible. Preserve the existing Resume presentation.
+      playButton.classList.toggle("hidden", mode === "begin");
     }
 
     function hideStartNow(){
       startNowButton.classList.add("hidden");
+      playButton.classList.remove("hidden");
       if(startNowMode !== "resume") startNowButton.textContent = "Begin";
     }
 
@@ -1422,39 +1429,48 @@
       });
     }
 
+    function hasValidMainMetadata(){
+      return !audio.error && audio.readyState >= 1 &&
+        Number.isFinite(audio.duration) && audio.duration > 0;
+    }
+
+    function mainMediaState(){
+      return `duration ${String(audio.duration)}s · readyState ${audio.readyState} · networkState ${audio.networkState} · ended ${audio.ended} · error ${audio.error?.code || "none"}`;
+    }
+
     async function ensureMetadata(timeoutMs = 30000){
       assignSourceIfNeeded();
-
-      if(audio.readyState >= 1 && isFinite(audio.duration) && audio.duration > 0){
-        return true;
-      }
+      if(hasValidMainMetadata()) return true;
+      if(audio.error) throw new Error(`Audio load error · ${mainMediaState()}`);
 
       return new Promise((resolve, reject)=>{
+        const events = ["loadedmetadata", "durationchange", "loadeddata", "canplay", "progress"];
         const timeout = setTimeout(()=>{
           cleanup();
-          reject(new Error("Metadata timeout"));
+          reject(new Error(`Metadata timeout · ${mainMediaState()}`));
         }, timeoutMs);
 
         function onLoaded(){
+          if(!hasValidMainMetadata()) return;
           cleanup();
           resolve(true);
         }
 
         function onError(){
           cleanup();
-          reject(new Error("Audio load error"));
+          reject(new Error(`Audio load error · ${mainMediaState()}`));
         }
 
         function cleanup(){
           clearTimeout(timeout);
-          audio.removeEventListener("loadedmetadata", onLoaded);
+          for(const event of events) audio.removeEventListener(event, onLoaded);
           audio.removeEventListener("error", onError);
         }
 
-        audio.addEventListener("loadedmetadata", onLoaded);
+        for(const event of events) audio.addEventListener(event, onLoaded);
         audio.addEventListener("error", onError);
-        // Do not call load() again here. startDownload() owns the one explicit
-        // main-track load request; restarting it can disturb slow iOS media loads.
+        // startDownload still owns the explicit load request.
+        if(audio.error) onError(); else onLoaded();
       });
     }
 
@@ -1571,6 +1587,9 @@
 
         audio.muted = true;
         await withTimeout(audio.play(), 12000, "Audio priming timeout");
+        if(!hasValidMainMetadata() || audio.ended || audio.paused){
+          throw new Error(`Audio priming failed · ${mainMediaState()}`);
+        }
 
         audio.pause();
         audio.currentTime = 0;
@@ -1623,7 +1642,7 @@
 
       try{
         assignSourceIfNeeded();
-        await ensureMetadata();
+        await ensureMetadata(5000);
 
         audio.pause();
         audio.muted = true;
@@ -1643,14 +1662,14 @@
         for(let passIndex = 0; passIndex < 2; passIndex++){
           audio.pause();
           audio.currentTime = calibrationStartSec;
-          await waitForSeek();
+          await withTimeout(waitForSeek(), 3000, "Calibration seek timeout");
 
           const playingPromise = waitForPlayingEvent();
-          await audio.play();
+          await withTimeout(audio.play(), 4000, "Calibration play timeout");
           const didPlay = await playingPromise;
 
-          if(!didPlay || audio.paused){
-            throw new Error(`Calibration pass ${passIndex + 1} did not establish`);
+          if(!didPlay || audio.paused || audio.ended || !hasValidMainMetadata()){
+            throw new Error(`Calibration pass ${passIndex + 1} did not establish · ${mainMediaState()}`);
           }
 
           const realStartMs = highResNowMs();
@@ -1663,6 +1682,9 @@
 
           const realElapsedSec = Math.max(0, (realEndMs - realStartMs) / 1000);
           const mediaElapsedSec = Math.max(0, mediaEndSec - mediaStartSec);
+          if(!hasValidMainMetadata() || audio.ended || audio.paused || mediaElapsedSec <= 0){
+            throw new Error(`Calibration pass ${passIndex + 1} made no valid progress · ${mainMediaState()}`);
+          }
           const measuredLossSec = Math.max(0, realElapsedSec - mediaElapsedSec);
 
           startupCalibrationPasses.push({
@@ -1691,7 +1713,7 @@
 
         audio.pause();
         audio.currentTime = 0;
-        await waitForSeek();
+        await withTimeout(waitForSeek(), 3000, "Calibration seek timeout");
         audio.muted = false;
 
         updateTimingProbe();
@@ -1699,8 +1721,8 @@
       }catch(err){
         audio.pause();
         try{
-          audio.currentTime = 0;
-          await waitForSeek();
+          if(hasValidMainMetadata()) audio.currentTime = 0;
+          await withTimeout(waitForSeek(), 3000, "Calibration seek timeout");
         }catch(resetErr){
           // Best-effort reset only.
         }
@@ -1710,7 +1732,7 @@
         startupPipelineLossSec = 0;
         startupCalibrationPasses = [];
         updateTimingProbe();
-        return false;
+        throw err;
       }
     }
 
@@ -2149,7 +2171,7 @@
 
 
     function performanceShouldBePlaying(){
-      if(!performanceClockFrozen || scheduledAnchorMs == null || audio.ended) return false;
+      if(!programPlaybackStarted || !performanceClockFrozen || scheduledAnchorMs == null || audio.ended) return false;
       if(!isFinite(audio.duration) || audio.duration <= 0) return false;
 
       const expected = getExpectedTrackTimeSec();
@@ -2356,6 +2378,17 @@
     }
 
     async function startPlaybackAtCurrentCorrectOffset(){
+      if(programStartInFlight) return false;
+      programStartInFlight = true;
+      try{
+        return await performStartupAtCurrentCorrectOffset();
+      }finally{
+        programStartInFlight = false;
+        if(!programPlaybackStarted) pendingTimingOperation = null;
+      }
+    }
+
+    async function performStartupAtCurrentCorrectOffset(){
       if(scheduledAnchorMs == null){
         throw new Error("No scheduled anchor");
       }
@@ -2372,7 +2405,12 @@
       let offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
       timingOp.expectedAtCalculationSec = offsetSec;
 
-      if(!isFinite(audio.duration) || offsetSec >= audio.duration){
+      if(!hasValidMainMetadata()){
+        setStatus("Audio not ready — tap Begin to retry");
+        setDebug(mainMediaState());
+        return false;
+      }
+      if(offsetSec >= audio.duration){
         stopPreshowImmediately();
         setStatus("Start time is beyond the end of the audio");
         return false;
@@ -2422,9 +2460,16 @@
 
       audio.muted = false;
 
+      if(!hasValidMainMetadata()){
+        throw new Error(`Audio metadata lost during startup · ${mainMediaState()}`);
+      }
       timingOp.playCalledAtMs = highResNowMs();
       await audio.play();
       timingOp.playResolvedAtMs = highResNowMs();
+      if(!hasValidMainMetadata() || audio.ended || audio.paused){
+        throw new Error(`Playback did not establish · ${mainMediaState()}`);
+      }
+      programPlaybackStarted = true;
 
       crossfadeFromPreshowToMain();
 
@@ -2457,13 +2502,16 @@
           startAttempted = false;
           waitingForManualStart = true;
           showStartNow();
-          setStatus("Ready — tap Begin");
+          // Keep the actual buffering/metadata/end reason from startup.
+          if(hasValidMainMetadata() && !statusEl.textContent.includes("beyond the end")){
+            setStatus(`${statusEl.textContent} Tap Begin`);
+          }
         }
       }catch(err){
         startAttempted = false;
         waitingForManualStart = true;
         showStartNow();
-        setStatus("Tap Begin");
+        setStatus(hasValidMainMetadata() ? "Tap Begin" : "Audio not ready — tap Begin to retry");
         setDebug(`Automatic start was blocked: ${err.message}`);
       }
     }
@@ -2511,6 +2559,7 @@
     }
 
     async function handlePrepare(isAutomaticRetry = false){
+      if(!isAutomaticRetry && (preparationInFlight || programStartInFlight)) return;
       // A fresh audience/user Begin starts a new preparation cycle.
       // An internal retry preserves the attempt count so we retry only once.
       if(!isAutomaticRetry){
@@ -2527,6 +2576,8 @@
       clearCrossfade();
       resetPlaybackRate();
       unfreezePerformanceClock();
+      scheduledAnchorMs = null;
+      programPlaybackStarted = false;
 
       stopPreshowImmediately();
       startNowMode = "begin";
@@ -2574,7 +2625,9 @@
         }
       }
 
+      preparationInFlight = true;
       playButton.disabled = true;
+      playButton.style.opacity = "1";
       playButton.textContent = "Preparing…";
 
       try{
@@ -2601,7 +2654,12 @@
         await primeAudioElement();
 
         setPreparationStage("Calibrating playback…");
-        await withTimeout(calibrateStartupBias(), 20000, "Playback calibration timeout");
+        // Each calibration media operation is bounded internally, so no
+        // abandoned calibration coroutine can race the existing single retry.
+        const calibrated = await calibrateStartupBias();
+        if(!calibrated || !hasValidMainMetadata() || audio.ended){
+          throw new Error(`Playback calibration failed · ${mainMediaState()}`);
+        }
         const preparationElapsedMs = Math.round(highResNowMs() - preparationAttemptStartedAtMs);
         lastPreparationOutcome = `success${preparationAttemptCount > 1 ? ` on retry ${preparationAttemptCount}` : ""} · gesture-bound output probe · ${preparationElapsedMs} ms`;
         updateTimingProbe();
@@ -2648,19 +2706,27 @@
         setDebug(`Preparation failed at ${failedStage}: ${err.message}`);
       }finally{
         clearPreparationStatusTimer();
-        if(!delegatedRetry && !startAttempted){
-          playButton.disabled = false;
-          playButton.textContent = "Begin";
+        if(!delegatedRetry){
+          preparationInFlight = false;
+          if(!startAttempted) unlockBeginButton();
         }
       }
     }
 
     async function handleManualStart(){
+      if(preparationInFlight || programStartInFlight) return;
       if(scheduledAnchorMs == null){
         setStatus("Tap Begin first");
         return;
       }
 
+      if(syncedNowMs() < scheduledAnchorMs) return;
+      // Only before the first real start: a fresh gesture may retry the existing
+      // preparation path if the browser lost the media. Never reset a live show.
+      if(!programPlaybackStarted && !hasValidMainMetadata()){
+        await handlePrepare(false);
+        return;
+      }
       startNowButton.disabled = true;
 
       try{
@@ -3161,7 +3227,7 @@
     audio.addEventListener("progress", ()=>{
       updateTransport();
 
-      if(waitingForManualStart && scheduledAnchorMs != null){
+      if(waitingForManualStart && scheduledAnchorMs != null && hasValidMainMetadata()){
         const offsetSec = Math.max(0, (syncedNowMs() - scheduledAnchorMs) / 1000);
         const bufferedEnd = getBufferedEndFor(offsetSec);
         const bufferedAhead = Math.max(0, bufferedEnd - offsetSec);
@@ -3182,7 +3248,7 @@
     audio.addEventListener("canplay", ()=>{
       updateTransport();
 
-      if(waitingForManualStart && scheduledAnchorMs != null){
+      if(waitingForManualStart && scheduledAnchorMs != null && hasValidMainMetadata()){
         setStatus("Ready — tap Begin");
       }
     });
@@ -3201,6 +3267,10 @@
     });
 
     audio.addEventListener("playing", ()=>{
+      if(!programPlaybackStarted && !programStartInFlight){
+        updateTransport();
+        return; // Muted priming/calibration is not the curtain.
+      }
       if(pendingTimingOperation){
         const op = pendingTimingOperation;
         op.playingEventAtMs = highResNowMs();
@@ -3229,6 +3299,13 @@
     // when both the scheduled timeline and the media playhead are genuinely near
     // the end of the loaded program. Otherwise we treat it as spurious and recover.
     audio.addEventListener("ended", async ()=>{
+      if(!programPlaybackStarted){
+        // Priming/calibration and in-flight first startup own their own failure path.
+        // Do not trigger recovery or post-show before actual program playback.
+        window.commonV9Diag?.event(`Startup: ignored ended before established playback · ${mainMediaState()}`);
+        updateTransport();
+        return;
+      }
       const expectedSec = getExpectedTrackTimeSec();
       const durationSec = Number(audio.duration);
       const currentSec = Number(audio.currentTime);
@@ -3242,6 +3319,10 @@
       const acceptEnded = durationKnown && expectedNearEnd && playheadNearEnd;
 
       if(!acceptEnded){
+        if(programStartInFlight){
+          window.commonV9Diag?.event(`Startup: premature ended while recovery already in flight · ${mainMediaState()}`);
+          return;
+        }
         const expectedText = Number.isFinite(expectedSec) ? expectedSec.toFixed(2) : "—";
         const currentText = Number.isFinite(currentSec) ? currentSec.toFixed(2) : "—";
         const durationText = durationKnown ? durationSec.toFixed(2) : "—";
@@ -3284,11 +3365,17 @@
       showPlayer();
       updateTransport();
 
+      programPlaybackStarted = false;
       // Curtain-to-epilogue transition: 5 s fade to black, 1 s black, 3 s reveal.
       beginPostShowSequence();
     });
 
     audio.addEventListener("error", ()=>{
+      if(!programPlaybackStarted){
+        window.commonV9Diag?.event(`Startup: media error · ${mainMediaState()}`);
+        updateTransport();
+        return; // Preparation/start owns the retry and button state.
+      }
       stopPreshowImmediately();
       setStatus("Audio failed to load");
       setDebug("Check custom domain, public bucket, CORS, and direct MP3 URL.");
@@ -3526,7 +3613,7 @@
  // Diagnostic build: default to native media playback; ?audio=web restores the V9 graph.
  const useWebAudio = new URLSearchParams(location.search).get('audio') === 'web';
  const mode = useWebAudio ? 'WEB' : 'NATIVE';
- document.querySelector('.subtitle').textContent = 'v9 · '+mode+' test';
+ document.querySelector('.subtitle').textContent = 'v9.1 · '+mode+' startup test';
  let overlay=false, broadcast=false;
  let ctx=null, source=null, gain=null, initialized=false, initError=null;
  const diag=(key,value)=>window.commonV9Diag?.set(key,value);
@@ -3595,7 +3682,10 @@
  function snapshot(reason){
    report(mode+' '+reason+' · '+document.visibilityState+
      ' · media '+(backbone.paused?'paused':'playing')+
-     ' @ '+backbone.currentTime.toFixed(2)+'s · context '+(ctx?.state || 'none'));
+     ' @ '+backbone.currentTime.toFixed(2)+'s · duration '+String(backbone.duration)+
+     's · ready '+backbone.readyState+' · network '+backbone.networkState+
+     ' · ended '+backbone.ended+' · error '+(backbone.error?.code||'none')+
+     ' · context '+(ctx?.state || 'none'));
    describe();
  }
  document.addEventListener('visibilitychange',()=>{
@@ -3605,7 +3695,7 @@
        .catch(err=>{report('resume failed '+err.message);describe();});
    }
  });
- for(const event of ['playing','pause','waiting','stalled','error','ended']){
+ for(const event of ['loadedmetadata','durationchange','playing','pause','waiting','stalled','error','ended']){
    backbone.addEventListener(event,()=>snapshot('media '+event));
  }
  for(const event of ['pagehide','pageshow']){
