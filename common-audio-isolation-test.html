@@ -1,22 +1,27 @@
+
+
+
+
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Common | Audio isolation test 2</title>
+<title>Common | Audio isolation test 3</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#092039;color:#f3f6fa;font:16px/1.5 system-ui,sans-serif}main{max-width:640px;margin:auto;padding:24px 18px 48px}h1{font-size:1.65rem;margin:0}p{margin:8px 0 18px;color:#c0d0df}.panel{background:#102e4c;border:1px solid #36536e;border-radius:12px;padding:16px;margin:16px 0}label{display:block;margin:10px 0}select,button,textarea{font:inherit}select{max-width:100%;padding:8px;background:#092039;color:white;border:1px solid #66849e;border-radius:6px}button{display:block;width:100%;padding:13px;border:0;border-radius:8px;margin:10px 0;background:#f3f6fa;color:#092039;font-weight:650}button.secondary{background:#244763;color:white;border:1px solid #66849e}button:disabled{opacity:.5}#result{font-weight:650;color:#fff;overflow-wrap:anywhere}#state{font-variant-numeric:tabular-nums;overflow-wrap:anywhere;font-size:.91rem;color:#c7d9ea}textarea{width:100%;height:320px;background:#071b2e;border:1px solid #66849e;color:#eef5ff;border-radius:8px;padding:10px;font:12px/1.45 ui-monospace,monospace;white-space:pre;resize:vertical}.hidden{display:none}small{color:#c0d0df}#result.fail{color:#ffb2a8}#result.pass{color:#a4ebc9}
 </style>
 </head>
 <body><main>
-<h1>Common · Audio isolation test</h1><p>Test 2 / standalone native media. No clock, intercom, overlay, pre-show, or Web Audio graph.</p>
+<h1>Common · Audio isolation test</h1><p>Test 3 / standalone native media. No clock, intercom, overlay, pre-show, or Web Audio graph.</p>
 <div class="panel">
 <label>Audio request <select id="cors"><option value="anonymous">Common's cross-origin mode (default)</option><option value="none">Without crossorigin attribute</option></select></label>
 <label><input type="checkbox" id="fresh"> Use a fresh soundtrack URL</label>
 <button id="run">Run Common-style sequence</button>
 <button id="progress">Run progress-gated sequence (0.5 s)</button>
+<button id="audible">Run unmuted prime (0.5 s)</button>
 <button id="control" class="secondary">Run continuous-play control</button>
-<small>For the new test, use the progress-gated button. The original sequence remains available as a comparison. Close other Common tabs. Keep the screen awake. The Common-style test is muted; the continuous-play control is audible.</small>
+<small>For the new test, use the unmuted prime button. It is audible for the first half second; the subsequent calibration is muted. The other tests remain available as comparisons. Close other Common tabs. Keep the screen awake.</small>
 </div>
 <div class="panel" aria-live="polite"><div id="result">Ready to test.</div><div id="state">No media loaded.</div></div>
 <button id="copy" class="secondary">Copy diagnostic log</button><div id="copyStatus" role="status"></div>
@@ -43,12 +48,12 @@ function waitUntil(predicate,ms,label){return new Promise((resolve,reject)=>{con
 function waitPlaying(ms=3000){let timer,listener;const promise=new Promise(resolve=>{listener=()=>finish(true);timer=setTimeout(()=>finish(false),ms);media.addEventListener('playing',listener,{once:true});function finish(v){clearTimeout(timer);media.removeEventListener('playing',listener);resolve(v)}});return {promise,cancel(){clearTimeout(timer);media.removeEventListener('playing',listener)}}}
 async function seek(t){snap(`before seek ${t}s`);media.currentTime=t;snap(`after currentTime=${t}`);await waitUntil(()=>!media.seeking,3000,'seek');snap('seek settled')}
 function newMedia(){const old=media;old.pause();old.removeAttribute('src');old.load();const a=document.createElement('audio');a.id='audio';a.className='hidden';a.preload='auto';a.setAttribute('playsinline','');if($('cors').value==='anonymous')a.crossOrigin='anonymous';old.replaceWith(a);media=a;for(const e of events)a.addEventListener(e,()=>{if(media===a)snap('event '+e)});return a}
-function setBusy(v){busy=v;for(const id of ['run','progress','control','cors','fresh'])$(id).disabled=v}
+function setBusy(v){busy=v;for(const id of ['run','progress','audible','control','cors','fresh'])$(id).disabled=v}
 async function metadata(){await waitUntil(()=>media.readyState>=1&&(plausible(media.duration)||(Number.isFinite(media.duration)&&(media.ended||(media.readyState>=4&&media.networkState===1)))),30000,'metadata');snap('metadata checkpoint');assertValid()}
 const PRIME_PROGRESS_SEC=0.5;
 async function waitForPrimeProgress(a){
  const baseline=a.currentTime;
- snap('waiting for 0.5s actual muted playback progress');
+ snap(`waiting for 0.5s actual ${a.muted?'muted':'unmuted'} playback progress`);
  const deadline=performance.now()+8000;
  while(true){
   assertValid();
@@ -58,11 +63,11 @@ async function waitForPrimeProgress(a){
   await sleep(25);
  }
 }
-async function run(control,progress=false){if(busy)return;setBusy(true);lines=[];start=performance.now();sawValid=false;firstCollapse=null;stage='loading';result.className='';result.textContent='Running…';$('copyStatus').textContent='';try{
- const a=newMedia();const url=new URL(AUDIO_URL);if($('fresh').checked)url.searchParams.set('common_retry',`${Date.now()}-isolation`);write(`Mode=${control?'continuous-play control':progress?'progress-gated sequence (0.5s)':'Common-style sequence'} | crossorigin=${a.getAttribute('crossorigin')||'absent'} | URL=${url.href}`);write(navigator.userAgent);a.src=url.href;a.load();snap('load() called');
+async function run(control,progress=false,audiblePrime=false){if(busy)return;setBusy(true);lines=[];start=performance.now();sawValid=false;firstCollapse=null;stage='loading';result.className='';result.textContent='Running…';$('copyStatus').textContent='';try{
+ const a=newMedia();const url=new URL(AUDIO_URL);if($('fresh').checked)url.searchParams.set('common_retry',`${Date.now()}-isolation`);write(`Mode=${control?'continuous-play control':audiblePrime?'unmuted prime (0.5s)':progress?'progress-gated sequence (0.5s)':'Common-style sequence'} | crossorigin=${a.getAttribute('crossorigin')||'absent'} | URL=${url.href}`);write(navigator.userAgent);a.src=url.href;a.load();snap('load() called');
  if(control){stage='continuous play';a.muted=false;const p=a.play();await bounded(p,12000,'play');snap('play resolved');await sleep(3000);snap('after 3 seconds');assertValid();if(a.ended||a.paused||a.currentTime<=0)throw new Error('Playback did not advance normally');a.pause();snap('paused without seek');await sleep(300);snap('after pause');assertValid();}
  else{
- await metadata();stage='priming';a.muted=true;snap('before muted play');await bounded(a.play(),12000,'priming play');snap('priming play resolved');assertValid();if(a.paused||a.ended)throw new Error('Priming did not establish playback');if(progress)await waitForPrimeProgress(a);a.pause();snap('immediately after prime pause');a.currentTime=0;snap('immediately after prime seek to 0');a.muted=false;snap('immediately after unmute');await waitUntil(()=>!a.seeking,5000,'prime reset seek');snap('prime reset settled');
+ await metadata();stage='priming';a.muted=!audiblePrime;snap(`before ${a.muted?'muted':'unmuted'} play`);await bounded(a.play(),12000,'priming play');snap('priming play resolved');assertValid();if(a.paused||a.ended)throw new Error('Priming did not establish playback');if(progress)await waitForPrimeProgress(a);a.pause();snap('immediately after prime pause');a.currentTime=0;snap('immediately after prime seek to 0');a.muted=false;snap('immediately after unmute');await waitUntil(()=>!a.seeking,5000,'prime reset seek');snap('prime reset settled');
  stage='calibration metadata';await metadata();a.pause();a.muted=true;a.volume=1;snap('calibration initialized');
  for(let pass=1;pass<=2;pass++){
  stage=`calibration pass ${pass}`;a.pause();snap('before calibration seek');await seek(1);assertValid();const playing=waitPlaying();try{await bounded(a.play(),4000,'calibration play');snap('calibration play resolved');if(!await playing.promise||a.paused||a.ended)throw new Error('Calibration did not establish playback');assertValid();const mediaStart=a.currentTime;await sleep(1200);snap('after 1200ms sample');assertValid();if(a.paused||a.ended||a.currentTime<=mediaStart)throw new Error('Calibration made no valid progress');}finally{playing.cancel()}
@@ -76,5 +81,10 @@ async function run(control,progress=false){if(busy)return;setBusy(true);lines=[]
 }
 $('run').addEventListener('click',()=>run(false));$('control').addEventListener('click',()=>run(true));
 $('progress').addEventListener('click',()=>run(false,true));
+$('audible').addEventListener('click',()=>run(false,true,true));
 $('copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(log.value);$('copyStatus').textContent='Log copied.'}catch(e){log.focus();log.select();$('copyStatus').textContent='Select and copy the log manually.'}});
 </script></body></html>
+
+
+
+
